@@ -47,6 +47,10 @@ docker compose up -d --build
 
 默认映射端口 `8080`，可用 `PORT=8090 docker compose up -d` 更换。
 
+> 若宿主机 8080 已被占用，直接换端口即可（容器内始终是 8080）：
+> `PORT=18080 docker compose up -d`，或
+> `docker run -d --restart unless-stopped -p 18080:8080 --name echo-cad-toolbox echo-cad-toolbox:1.0.0`
+
 ### 方式 B：本地运行
 
 ```bash
@@ -56,6 +60,29 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
 访问 <http://localhost:8080>；API 文档在 <http://localhost:8080/docs>。
+
+### 局域网 / 内网访问
+
+服务默认监听 `0.0.0.0`，容器端口也发布到所有网卡，因此同网段的其他电脑、手机、平板
+可直接用宿主机 IP 打开，无需额外配置：
+
+```bash
+# 自动列出本机所有网卡地址并逐个探测（输出即别人能打开的地址）
+python3 tools/lan_check.py            # 默认探测 8080 / 18080
+python3 tools/lan_check.py 18080      # 指定端口
+
+# 典型输出
+#   ✅ http://192.168.31.35:18080/  [enp5s0]  echo-cad-toolbox 1.0.0
+#   ✅ http://192.168.31.148:18080/ [wlo1]    echo-cad-toolbox 1.0.0
+```
+
+- 手机/平板浏览器直接访问该地址即可，界面在窄屏自动切为「参数 → 画布 → 指标」纵向布局，
+  触摸可拖拽平移、双指缩放（或双击复位）。
+- 页面上的「分享」按钮复制出的链接带完整主机地址，可直接发到同一内网的其他设备打开。
+- 打不开时依次检查：① 服务是否存活（`docker ps` 应显示 `healthy`）；
+  ② 宿主机防火墙是否放行端口（Debian/Ubuntu：`sudo ufw allow 18080/tcp`）；
+  ③ 路由器是否开启了 AP 隔离 / 访客网络隔离。
+- 公网暴露请自行加反向代理与访问控制，本服务无鉴权。
 
 ### 命令行批量出图
 
@@ -203,7 +230,10 @@ echo-cad-toolbox/
 │   ├── cli.py          # 命令行出图
 │   └── static/         # 前端（原生 JS + Canvas，无构建步骤）
 ├── tests/              # pytest：几何 / API / DXF
-├── tools/browser_check.py  # 无头浏览器端到端检查
+├── tools/
+│   ├── browser_check.py    # 无头浏览器端到端检查（JS 错误 + 画布像素）
+│   ├── lan_check.py        # 局域网可访问性自检（列出可分享地址）
+│   └── shoot.py            # 生成 README 配图
 ├── Dockerfile          # 多阶段构建，非 root 运行，内置 HEALTHCHECK
 └── docker-compose.yml
 ```

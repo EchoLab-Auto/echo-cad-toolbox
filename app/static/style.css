@@ -313,12 +313,34 @@ input[type="number"] { width: 100%; text-align: right; font-family: var(--mono);
   .layout { grid-template-columns: 260px minmax(0, 1fr) 250px; }
 }
 
+/* 平板 / 手机：单列堆叠，画布占屏高的一部分 */
 @media (max-width: 980px) {
   html, body { overflow: auto; }
   body { height: auto; min-height: 100%; }
-  .layout { grid-template-columns: 1fr; grid-template-rows: auto 70vh auto; }
+  /* minmax(0, 1fr)：避免面板内长内容把网格撑出视口（横向滚动） */
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 62vh auto;
+  }
   .panel { max-height: none; }
   .panel-left { border-right: none; border-bottom: 1px solid var(--line); }
   .panel-right { border-left: none; border-top: 1px solid var(--line); }
   .topbar { position: sticky; top: 0; z-index: 20; }
+}
+
+/* 手机竖屏：紧凑化，触控友好 */
+@media (max-width: 560px) {
+  body { font-size: 13px; }
+  .topbar { padding: 8px 10px; gap: 8px; }
+  .brand h1 { font-size: 13.5px; }
+  .brand p { display: none; }
+  .btn { padding: 7px 10px; }
+  .export-group { padding-left: 0; margin-left: 0; border-left: none; }
+  .panel { padding: 10px 10px 26px; }
+  .hud { top: 8px; left: 10px; font-size: 10px; }
+  .legend { display: none; }
+  .animbar { left: 8px; right: 8px; bottom: 8px; gap: 6px; padding: 6px 8px; }
+  .slider-block.grow { flex: 1 1 100%; min-width: 0; }
+  .icon-btn { width: 32px; height: 30px; }
+  .metric .v { font-size: 13px; }
 }
