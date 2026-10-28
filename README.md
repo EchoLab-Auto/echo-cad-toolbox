@@ -51,6 +51,26 @@ docker compose up -d --build
 > `PORT=18080 docker compose up -d`，或
 > `docker run -d --restart unless-stopped -p 18080:8080 --name echo-cad-toolbox echo-cad-toolbox:1.0.0`
 
+### 服务器部署（纯 docker 一键脚本）
+
+没有 `docker compose` 插件的主机（例如云服务器）用 `tools/deploy.sh`，它在上面 `docker run`
+的基础上额外做了「同步源码 → 构建 → 替换容器 → 等健康检查 → 打印可访问地址」：
+
+```bash
+git clone --depth 1 https://github.com/EchoLab-Auto/echo-cad-toolbox.git /opt/echo-cad-toolbox
+cd /opt/echo-cad-toolbox
+
+# 指定端口（例：2228），PyPI 走云厂商内网镜像
+PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple ./tools/deploy.sh 2228
+
+# 之后更新版本只需（PULL=1 先 git 同步到 origin/main）
+PULL=1 PIP_INDEX_URL=... ./tools/deploy.sh 2228
+```
+
+> **构建加速的坑**：`PIP_INDEX_URL` 在 Dockerfile 里是 `ARG`，只能通过 `--build-arg`
+> 传入。只写 `PIP_INDEX_URL=xxx docker build ...`（环境变量）**不会生效**，pip 仍走
+> `pypi.org`，在国内主机上会卡在几 MB 的 wheel 上十几分钟。脚本已处理好这一点。
+
 ### 方式 B：本地运行
 
 ```bash
@@ -60,6 +80,24 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
 访问 <http://localhost:8080>；API 文档在 <http://localhost:8080/docs>。
+
+### 已部署实例
+
+| 位置 | 地址 | 说明 |
+| --- | --- | --- |
+| cloud-server-2（腾讯云，广州） | <http://114.132.241.46:2228/> | 公网可达，`restart=unless-stopped`，内存上限 512 MiB |
+| 4090 工作站（内网） | <http://192.168.31.35:18080/> | 局域网可达，见下节 |
+
+容器常驻参数（与 `tools/deploy.sh` 一致）：
+
+```bash
+docker run -d --name echo-cad-toolbox --restart unless-stopped \
+  -p 2228:8080 --memory 512m echo-cad-toolbox:1.0.0
+```
+
+> ⚠️ 本服务**没有鉴权**，端口对公网开放意味着任何人都能访问与下载 DXF。
+> 仅供内网 / 临时演示；若需长期公网暴露，请在前面加一层 Nginx + Basic Auth 或
+> 只允许固定 IP（云安全组）访问。
 
 ### 局域网 / 内网访问
 
@@ -233,6 +271,7 @@ echo-cad-toolbox/
 ├── tools/
 │   ├── browser_check.py    # 无头浏览器端到端检查（JS 错误 + 画布像素）
 │   ├── lan_check.py        # 局域网可访问性自检（列出可分享地址）
+│   ├── deploy.sh           # 服务器一键部署（纯 docker，无 compose 也能跑）
 │   └── shoot.py            # 生成 README 配图
 ├── Dockerfile          # 多阶段构建，非 root 运行，内置 HEALTHCHECK
 └── docker-compose.yml
