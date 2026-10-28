@@ -4,8 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # 国内网络可换成 https://pypi.tuna.tsinghua.edu.cn/simple
+        # 国内网络：PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        # 拉不到官方 python 镜像时可用加速源，例如
+        # PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
     image: echo-cad-toolbox:1.0.0
     container_name: echo-cad-toolbox
     restart: unless-stopped

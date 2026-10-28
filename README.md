@@ -37,11 +37,15 @@ docker build -t echo-cad-toolbox:1.0.0 .
 docker run -d -p 8080:8080 --name cad-toolbox echo-cad-toolbox:1.0.0
 ```
 
-国内网络构建较慢时可换 PyPI 镜像：
+国内网络构建较慢 / 拉不到官方镜像时，可同时指定 PyPI 与基础镜像加速源：
 
 ```bash
-PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose up -d --build
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
+docker compose up -d --build
 ```
+
+默认映射端口 `8080`，可用 `PORT=8090 docker compose up -d` 更换。
 
 ### 方式 B：本地运行
 
