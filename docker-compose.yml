@@ -1,0 +1,31 @@
+services:
+  cad-toolbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内网络可换成 https://pypi.tuna.tsinghua.edu.cn/simple
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: echo-cad-toolbox:1.0.0
+    container_name: echo-cad-toolbox
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # 无状态服务，限制资源便于在边缘设备/工控机上运行
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M

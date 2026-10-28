@@ -1,0 +1,242 @@
+# echo-cad-toolbox
+
+**摆线针轮轮廓生成与可视化仿真器** —— 一个可部署在 Docker 中的 Web 工具：交互式生成摆线针轮
+（RV / 摆线针轮减速器）齿廓、实时运动学仿真、啮合接触分析，并导出**毫米级 DXF 图纸**用于
+CNC / 线切割 / 激光加工。
+
+![界面](docs/screenshot.png)
+
+| 紧凑型 11/12（i=11:1） | 大速比 59/60（i=59:1，齿高更小） |
+| --- | --- |
+| ![紧凑型](docs/screenshot-compact.png) | ![大速比](docs/screenshot-highratio.png) |
+
+```
+┌────────────┬──────────────────────────────────┬────────────┐
+│  参数面板   │        交互式 2D 视图             │  指标 / 诊断 │
+│  基本参数   │  摆线轮 + 针轮 + 柱销 + 接触点     │  传动比     │
+│  齿廓修形   │  滚轮缩放 / 拖拽平移 / 播放动画    │  齿顶齿根   │
+│  输出机构   │                                  │  告警       │
+└────────────┴──────────────────────────────────┴────────────┘
+```
+
+---
+
+## 1. 快速开始
+
+### 方式 A：Docker（推荐）
+
+```bash
+docker compose up -d --build
+# 打开 http://localhost:8080
+```
+
+或直接使用镜像：
+
+```bash
+docker build -t echo-cad-toolbox:1.0.0 .
+docker run -d -p 8080:8080 --name cad-toolbox echo-cad-toolbox:1.0.0
+```
+
+国内网络构建较慢时可换 PyPI 镜像：
+
+```bash
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose up -d --build
+```
+
+### 方式 B：本地运行
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+访问 <http://localhost:8080>；API 文档在 <http://localhost:8080/docs>。
+
+### 命令行批量出图
+
+```bash
+python -m app.cli --zc 39 --e 1.43 --rz 88 --rp 5.5 --parts cycloid_disc -o disc.dxf --print-params
+python -m app.cli --parts cycloid_disc,pin_ring,output_disc -o parts.dxf   # 三件分件排布
+python -m app.cli --parts assembly -o asm.dxf                            # 装配图
+```
+
+---
+
+## 2. 功能
+
+| 功能 | 说明 |
+| --- | --- |
+| **解析齿廓生成** | 短幅外摆线 + 等距偏移，直接给出可加工的闭合轮廓（非折线拟合近似） |
+| **三种修形** | 等距修形 Δrp、移距修形 ΔRz、转角修形 —— 用于形成啮合侧隙 |
+| **实时运动仿真** | 转臂输入 → 摆线轮低速反向输出，可播放/暂停/单步/拖拽转角 |
+| **啮合可视化** | 逐个针齿的接触点实时标出（接触律 τᵢ = ψᵢ + φ/Zc） |
+| **输出机构** | 柱销孔 / 柱销套 / 中心孔自动布局，带壁厚校验 |
+| **几何诊断** | 根切判据、齿廓自交（星形性）检测、孔壁厚、曲率 |
+| **DXF 导出** | 毫米单位 1:1，分层（PROFILE/THEORY/PIN/HOLE/…），单零件或分件排布 |
+| **SVG / PNG / JSON** | 矢量预览、界面截图、参数与派生量存档 |
+| **分享链接** | 参数编码进 URL，一键复制 |
+
+---
+
+## 3. 数学原理
+
+### 3.1 记号
+
+| 符号 | 含义 |
+| --- | --- |
+| `Zc` | 摆线轮齿数 |
+| `Zp = Zc + 1` | 针齿数 |
+| `e` | 偏心距 |
+| `Rz` | 针齿中心圆半径 |
+| `rp` | 针齿（套）半径 |
+| `Δrp` / `ΔRz` | 等距 / 移距修形量 |
+| `K1 = e·Zp / Rz` | 短幅系数（**必须 < 1**，工程常用 0.5 ~ 0.75） |
+
+### 3.2 齿廓
+
+理论齿廓是**短幅外摆线**（即针齿中心在摆线轮坐标系中划出的轨迹）：
+
+$$
+\begin{aligned}
+P(\tau) &= \bigl(R_z'\cos\tau - e\cos(Z_p\tau),\quad R_z'\sin\tau - e\sin(Z_p\tau)\bigr)\\
+S(\tau) &= \sqrt{R_z'^2 + (eZ_p)^2 - 2R_z'eZ_p\cos(Z_c\tau)}\\
+N(\tau) &= \frac{1}{S}\bigl(R_z'\cos\tau - eZ_p\cos(Z_p\tau),\ R_z'\sin\tau - eZ_p\sin(Z_p\tau)\bigr)
+\end{aligned}
+$$
+
+实际齿廓为理论齿廓的**内等距曲线**（`N` 为单位外法线）：
+
+$$
+Q(\tau) = P(\tau) - (r_p + \Delta r_p)\,N(\tau),\qquad R_z' = R_z - \Delta R_z
+$$
+
+### 3.3 运动学
+
+针轮固定、转臂输入时：
+
+$$
+C(\varphi) = e\,(\cos\varphi,\ \sin\varphi),\qquad
+\theta_c(\varphi) = -\frac{\varphi}{Z_c},\qquad
+i = \frac{\omega_{in}}{\omega_{out}} = Z_c
+$$
+
+### 3.4 接触律
+
+第 `i` 个针齿（`ψᵢ = 2πi/Zp`）与齿廓的接触点位于
+
+$$
+Q_i = Q\!\left(\psi_i + \frac{\varphi}{Z_c}\right)
+$$
+
+> 该关系经数值包络校验：任意转角下，齿廓到最近针齿中心的距离恒 `≥ rp`，
+> 接触处**恰好等于** `rp`，且零穿透（见 `tests/test_geometry.py`）。
+
+### 3.5 不根切条件
+
+理论齿廓出现尖点（`S → 0`）的条件为 `Rz' = e·Zp`，即
+
+$$
+K_1 = \frac{e\,Z_p}{R_z} < 1
+$$
+
+---
+
+## 4. API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/presets` | 参数预设 |
+| `POST` | `/api/analyze` | 轮廓 + 派生量 + 诊断（+ 可选接触表） |
+| `POST` | `/api/export/dxf` | 导出 DXF（JSON body） |
+| `GET` | `/api/export/dxf` | 导出 DXF（查询参数，便于 `wget`） |
+| `POST` | `/api/export/svg` | 导出 SVG |
+
+示例：
+
+```bash
+# 分析
+curl -s -X POST localhost:8080/api/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"params":{"tooth_count":39,"eccentricity":1.43,"pin_circle_radius":88,"pin_radius":5.5}}' | jq '.derived'
+
+# 直接下载 DXF
+curl -OJ "localhost:8080/api/export/dxf?tooth_count=39&eccentricity=1.43&pin_circle_radius=88&pin_radius=5.5&parts=cycloid_disc"
+```
+
+`parts` 取值：`cycloid_disc`（摆线轮）、`pin_ring`（针齿壳）、`output_disc`（输出盘）、
+`assembly`（装配图）。同时给出多个非 `assembly` 零件时按 2.6×外径 间距**分件排布**。
+
+---
+
+## 5. DXF 图层
+
+| 图层 | 内容 | 颜色 |
+| --- | --- | --- |
+| `PROFILE` | 摆线轮实际齿廓（闭合多段线，加工用） | 白 |
+| `THEORY` | 理论齿廓（短幅外摆线，参考） | 灰虚线 |
+| `BORE` / `HOLE` / `SLEEVE` | 中心孔 / 柱销孔 / 柱销 | 蓝 / 青 / 洋红 |
+| `PIN` / `PIN_PITCH` | 针齿圆 / 针齿中心圆 | 绿 / 灰虚线 |
+| `RING` | 针齿壳内外圆 | 黄 |
+| `CENTER` | 中心线 | 红点划线 |
+| `TEXT` | 标题与参数标注 | 白 |
+
+单位：`$INSUNITS = 4`（毫米），比例 1:1。文件头 `custom_vars` 中留档全部参数。
+
+---
+
+## 6. 项目结构
+
+```
+echo-cad-toolbox/
+├── app/
+│   ├── geometry.py     # 几何核心：参数、齿廓解析式、运动学、接触、诊断
+│   ├── dxf_export.py   # DXF 构建（ezdxf，多图层 / 分件排布）
+│   ├── svg_export.py   # SVG 预览图
+│   ├── api.py          # FastAPI 路由与校验模型
+│   ├── main.py         # 应用装配、静态资源、GZip
+│   ├── cli.py          # 命令行出图
+│   └── static/         # 前端（原生 JS + Canvas，无构建步骤）
+├── tests/              # pytest：几何 / API / DXF
+├── tools/browser_check.py  # 无头浏览器端到端检查
+├── Dockerfile          # 多阶段构建，非 root 运行，内置 HEALTHCHECK
+└── docker-compose.yml
+```
+
+---
+
+## 7. 测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q                     # 39 项单元 / 接口测试
+
+# 端到端（需先启动服务；会捕获 JS 错误并做画布像素统计）
+playwright install chromium
+python tools/browser_check.py http://127.0.0.1:8080/
+
+# 重新生成 README 配图
+python tools/shoot.py http://127.0.0.1:8080/
+```
+
+`tests/test_geometry.py` 中最关键的一项验证：把齿廓按运动学变换到世界坐标系后，
+齿廓上**任意**一点到最近针齿中心的距离必须 `≥ rp`（零穿透），且存在距离**恰好等于**
+`rp` 的接触点；同时齿廓径向极值个数必须等于 `Zc`，极角必须单调（星形性，即无自交）。
+
+---
+
+## 8. 使用提示
+
+- **短幅系数 K1 建议 0.5 ~ 0.75**：过小齿廓接近圆弧、承载差；接近 1 会根切。
+- **齿数 Zc 越大**，齿高越小（≈ `2e`）、传动比越大。
+- **修形**：先给 `Δrp = 0.01 ~ 0.03 mm` 形成侧隙；若需整体减小外径用 `ΔRz`。
+- 导出的 `PROFILE` 图层为闭合多段线，可直接用于 2.5D 轮廓加工；若需 G2/G3 圆弧，
+  建议在 CAM 中做「拟合圆弧」。
+- 摆线轮与针齿理论上是**多齿同时啮合**，视图中全部接触点都会显示。
+
+---
+
+## 9. 许可
+
+MIT
