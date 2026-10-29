@@ -117,8 +117,11 @@ edge-route list                          # 看路由 + 探测后端状态码
 ```
 
 DNS 只需加一条解析（`cad` → 这台机器 IP；或用 `*.你的域名` 泛解析一次搞定）。
-完整说明、端口选择理由（为什么用 80 + 2229）与踩坑记录见
-**[docs/edge-router.md](docs/edge-router.md)**。
+
+> ⚠️ **备案**：拦截是按 Host 判定的，与端口无关 —— 未备案的真实域名在 `:80` 和
+> `:2229` 上都会被 302 到 `dnspod.qcloud.com/webblock`，只有 HTTPS 不触发（Host 在
+> TLS 里）。域名已备案直接用 HTTP；未备案就走 HTTPS（放行 443 + 放证书）。
+> 完整实测矩阵与踩坑记录见 **[docs/edge-router.md](docs/edge-router.md)**。
 
 ### 局域网 / 内网访问
 
