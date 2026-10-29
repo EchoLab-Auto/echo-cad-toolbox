@@ -13,12 +13,17 @@
 #   NAME          容器名（默认 echo-cad-toolbox）
 #   PIP_INDEX_URL PyPI 镜像，**必须**通过 --build-arg 传递（Dockerfile 里是 ARG）
 #   PYTHON_IMAGE  基础镜像来源（拉不到官方镜像时用加速源）
+#   APT_MIRROR    Debian 软件源镜像（默认官方；国内建议 mirrors.cloud.tencent.com，
+#                 否则拉 mesa 的 libllvm19 极慢，构建会卡十几分钟）
 #   MEMORY        内存上限（默认 2g；晶格化的体素化很吃内存，
 #                 只用摆线针轮设计器的话 512m 够）
 #   PULL          设为 1 时先 git 同步到 origin/main
 #
 # 例（腾讯云内网加速）：
-#   PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple ./tools/deploy.sh 2228
+#   PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
+#   PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
+#   APT_MIRROR=mirrors.cloud.tencent.com \
+#   ./tools/deploy.sh 2228
 # ---------------------------------------------------------------------------
 set -e
 
@@ -29,6 +34,7 @@ IMAGE="${IMAGE:-echo-cad-toolbox:1.1.0}"
 NAME="${NAME:-echo-cad-toolbox}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 PYTHON_IMAGE="${PYTHON_IMAGE:-python:3.12-slim}"
+APT_MIRROR="${APT_MIRROR:-}"
 MEMORY="${MEMORY:-2g}"
 
 if [ "${PULL:-0}" = "1" ]; then
@@ -44,6 +50,7 @@ echo "[1/4] 构建镜像 $IMAGE"
 docker build \
   --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
   --build-arg "PYTHON_IMAGE=$PYTHON_IMAGE" \
+  --build-arg "APT_MIRROR=$APT_MIRROR" \
   -t "$IMAGE" .
 
 echo "[2/4] 替换容器 $NAME（宿主机 :$PORT -> 容器 :8080）"

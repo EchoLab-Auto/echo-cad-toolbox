@@ -41,11 +41,27 @@ ENV PYTHONUNBUFFERED=1 \
 
 # gmsh 的 libgmsh.so 链接了 OpenGL / X11 / freetype（只用 OCC 曲面离散、不开 GUI，
 # 但动态链接阶段仍然要能找到这些 .so），这里一次装齐。
-RUN apt-get update \
+#
+# APT_MIRROR 用于国内/内网部署：默认走 deb.debian.org，在国内机器上拉 mesa 的
+# libllvm19（26 MB 且慢）会卡十几分钟甚至超时。传 mirrors.cloud.tencent.com 之类
+# 的镜像即可，例如：
+#   docker build --build-arg APT_MIRROR=mirrors.cloud.tencent.com -t ... .
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+            sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+                /etc/apt/sources.list.d/debian.sources; \
+        fi; \
+        if [ -f /etc/apt/sources.list ]; then \
+            sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+                /etc/apt/sources.list; \
+        fi; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         libgl1 libglu1-mesa libglx-mesa0 libopengl0 \
         libx11-6 libxext6 libxrender1 libxfixes3 libxcursor1 libxinerama1 \
-        libxft2 libfontconfig1 libfreetype6 libpng16-16 \
+        libxft2 libfontconfig1 libfreetype6 \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 

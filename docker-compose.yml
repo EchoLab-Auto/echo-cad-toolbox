@@ -9,6 +9,8 @@ services:
         # 拉不到官方 python 镜像时可用加速源，例如
         # PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+        # Debian 软件源镜像（国内建议 mirrors.cloud.tencent.com）
+        APT_MIRROR: ${APT_MIRROR:-}
     image: echo-cad-toolbox:1.1.0
     container_name: echo-cad-toolbox
     restart: unless-stopped

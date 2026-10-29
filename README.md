@@ -45,13 +45,18 @@ docker build -t echo-cad-toolbox:1.0.0 .
 docker run -d -p 8080:8080 --name cad-toolbox echo-cad-toolbox:1.0.0
 ```
 
-国内网络构建较慢 / 拉不到官方镜像时，可同时指定 PyPI 与基础镜像加速源：
+国内网络构建较慢 / 拉不到官方镜像时，可同时指定三个加速源（PyPI、基础镜像、Debian 软件源）：
 
 ```bash
-PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
 PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
+APT_MIRROR=mirrors.cloud.tencent.com \
 docker compose up -d --build
 ```
+
+> `APT_MIRROR` 是给晶格化准备的：`libgmsh.so` 需要 OpenGL / X11 运行库，其中 mesa 会拖入
+> `libllvm19`（26 MB）。直连 `deb.debian.org` 在国内机器上会卡十几分钟甚至超时，
+> 换镜像源后 apt 阶段从「卡死」变成几秒。
 
 默认映射端口 `8080`，可用 `PORT=8090 docker compose up -d` 更换。
 
@@ -68,8 +73,11 @@ docker compose up -d --build
 git clone --depth 1 https://github.com/EchoLab-Auto/echo-cad-toolbox.git /opt/echo-cad-toolbox
 cd /opt/echo-cad-toolbox
 
-# 指定端口（例：2228），PyPI 走云厂商内网镜像
-PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple ./tools/deploy.sh 2228
+# 指定端口（例：2228），三个源都走云厂商内网镜像
+PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
+PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
+APT_MIRROR=mirrors.cloud.tencent.com \
+./tools/deploy.sh 2228
 
 # 之后更新版本只需（PULL=1 先 git 同步到 origin/main）
 PULL=1 PIP_INDEX_URL=... ./tools/deploy.sh 2228
@@ -98,7 +106,7 @@ API 文档在 <http://localhost:8080/docs>（晶格化接口在 `/api/lattice/*`
 
 | 位置 | 地址 | 说明 |
 | --- | --- | --- |
-| cloud-server-2（腾讯云，广州） | <http://114.132.241.46:2228/> | 公网可达，`restart=unless-stopped`，内存上限 512 MiB |
+| cloud-server-2（腾讯云，广州） | <http://114.132.241.46:2228/> | 公网可达，`restart=unless-stopped`，内存上限 1 GiB（机器总内存仅 2 GB） |
 | cloud-server-2（子域名入口） | `http://cad.<你的域名>:2229/` | 域名前缀分流由 **echo-server-core** 的进程内插件 `esc.edge-router` 提供（见该仓 `docs/EDGE-ROUTER.md`）；本仓不再包含该反代 |
 | 4090 工作站（内网） | <http://192.168.31.35:18080/> | 局域网可达，见下节 |
 
@@ -106,8 +114,13 @@ API 文档在 <http://localhost:8080/docs>（晶格化接口在 `/api/lattice/*`
 
 ```bash
 docker run -d --name echo-cad-toolbox --restart unless-stopped \
-  -p 2228:8080 --memory 512m echo-cad-toolbox:1.0.0
+  -p 2228:8080 --memory 1g -v echo-cad-toolbox-data:/app/data \
+  echo-cad-toolbox:1.1.0
 ```
+
+> **内存**：只用摆线针轮设计器时 512 MiB 绰绰有余；一旦用晶格化，体素化 + marching cubes
+> 的峰值会到几百 MB。128~160 分辨率建议 ≥ 1 GiB，200~256 分辨率建议 ≥ 2 GiB。
+> 内存吃紧时把「体素分辨率」调到 128 即可（大多数减重件够用）。
 
 > ⚠️ 本服务**没有鉴权**，端口对公网开放意味着任何人都能访问与下载 DXF。
 > 仅供内网 / 临时演示；若需长期公网暴露，请在前面加一层 Nginx + Basic Auth 或
