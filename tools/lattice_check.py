@@ -240,6 +240,22 @@ def main() -> int:
         else:
             bad(f"统计面板异常：{stats[:110]}")
 
+        # 统计面板出现只代表后端算完了；GLB 预览是随后异步下载的
+        # （公网上 3~4 MB 要几秒），必须等它真正进场景，否则会误判成"加载失败"
+        try:
+            page.wait_for_function(
+                """() => {
+                  const L = window.__lattice;
+                  if (!L) return false;
+                  let n = 0;
+                  L.groups.lattice.traverse((o) => { if (o.isMesh) n++; });
+                  return n > 0;
+                }""",
+                timeout=120000,
+            )
+        except Exception:  # noqa: BLE001
+            pass  # 交给下面的断言给出具体信息
+
         lat_scene = scene_meshes(page, "lattice")
         px = canvas_pixels(page)
         if lat_scene.get("meshes", 0) < 1:
