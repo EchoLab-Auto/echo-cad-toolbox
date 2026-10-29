@@ -147,7 +147,13 @@ def delete_job(job_id: str) -> dict[str, Any]:
 # 产物
 # ---------------------------------------------------------------------------
 @router.get("/jobs/{job_id}/preview/{kind}", summary="GLB 预览（original | lattice）")
-def preview(job_id: str, kind: str, v: int | None = None):
+def preview(job_id: str, kind: str, v: str | None = None):
+    """返回 GLB 预览。
+
+    ``v`` 是前端用来穿透浏览器缓存的版本标记（形如 ``3-1793264757956``），
+    这里只做透传、不参与任何判断，所以声明成 ``str``：一旦声明为 ``int``，
+    FastAPI 会对这类复合值返回 422，直接表现为前端「预览加载失败」。
+    """
     try:
         job = store.get(job_id)
     except JobError as exc:

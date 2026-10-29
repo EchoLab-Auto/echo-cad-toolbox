@@ -33,7 +33,11 @@ def canvas_pixels(page, selector: str = "#canvas") -> dict:
     box = page.locator(selector).bounding_box()
     if not box or box["width"] < 2 or box["height"] < 2:
         return {"error": "canvas 尺寸异常"}
+    # HUD 里的按钮是绿/青色，会被 "teal" 判定误当成晶格像素，统计时先隐藏
+    page.add_style_tag(content=".hud{display:none!important}")
+    page.wait_for_timeout(120)
     shot = page.screenshot(clip=box)
+    page.add_style_tag(content=".hud{display:block!important}")
     image = Image.open(io.BytesIO(shot)).convert("RGB")
     w, h = image.size
     px = image.load()
@@ -53,6 +57,31 @@ def canvas_pixels(page, selector: str = "#canvas") -> dict:
         "w": w, "h": h, "total": total,
         "lit": round(lit / total, 4), "teal": round(teal / total, 4), "dark": round(black / total, 4),
     }
+
+
+def scene_meshes(page, group: str) -> dict:
+    """读 three.js 场景图，确认某个 group 里真的有网格。
+
+    比像素统计可靠：HUD 的绿色按钮、「原始」模型的灰色都会污染颜色判定。
+    """
+    return page.evaluate(
+        """(name) => {
+          const L = window.__lattice;
+          if (!L) return {error: 'no __lattice hook'};
+          const g = L.groups[name];
+          let meshes = 0, tris = 0, hasNormals = 0;
+          g.traverse((o) => {
+            if (!o.isMesh) return;
+            meshes += 1;
+            const geo = o.geometry;
+            if (geo?.index) tris += geo.index.count / 3;
+            else if (geo?.attributes?.position) tris += geo.attributes.position.count / 3;
+            if (geo?.attributes?.normal) hasNormals += 1;
+          });
+          return {meshes, tris: Math.round(tris), hasNormals, visible: g.visible};
+        }""",
+        group,
+    )
 
 
 def canvas_2d_pixels(page, selector: str = "#view") -> dict:
@@ -101,8 +130,16 @@ def main() -> int:
         page = browser.new_page(viewport={"width": 1600, "height": 900})
         js_errors: list[str] = []
         failed: list[str] = []
+        # 关键：GLB 预览是 fetch 出来的，HTTP 4xx/5xx 不会触发 requestfailed，
+        # 也不会抛 JS 异常，只会在前端弹一句「预览加载失败」。必须显式记住状态码。
+        bad_responses: list[str] = []
         page.on("pageerror", lambda e: js_errors.append(str(e)))
         page.on("requestfailed", lambda r: failed.append(f"{r.url} ({r.failure})"))
+        page.on(
+            "response",
+            lambda r: bad_responses.append(f"{r.status} {r.url}")
+            if r.status >= 400 else None,
+        )
 
         page.goto(f"{BASE}/", wait_until="networkidle")
         page.wait_for_timeout(600)
@@ -171,11 +208,16 @@ def main() -> int:
         else:
             bad(f"轮盘信息缺失：{info_text!r}")
 
+        scene = scene_meshes(page, "original")
         px = canvas_pixels(page)
-        if px.get("lit", 0) > 0.01:
-            ok(f"轮盘已渲染：亮像素 {px['lit'] * 100:.1f}%（暗像素 {px['dark'] * 100:.1f}%）")
+        if scene.get("meshes", 0) < 1:
+            bad(f"原始模型未加入场景：{scene}")
+        elif scene.get("hasNormals", 0) < scene["meshes"]:
+            bad(f"网格缺法向（会渲染成全黑）：{scene}")
+        elif px.get("lit", 0) > 0.01:
+            ok(f"轮盘已渲染：{scene['tris']:,} 三角形，亮像素 {px['lit'] * 100:.1f}%")
         else:
-            bad(f"轮盘未渲染或全黑：{px}")
+            bad(f"轮盘未渲染或全黑：场景={scene} 像素={px}")
 
         # 生成晶格
         print("[4] 生成晶格")
@@ -198,11 +240,14 @@ def main() -> int:
         else:
             bad(f"统计面板异常：{stats[:110]}")
 
+        lat_scene = scene_meshes(page, "lattice")
         px = canvas_pixels(page)
-        if px.get("teal", 0) > 0.005:
-            ok(f"晶格已渲染：青绿像素 {px['teal'] * 100:.2f}%")
+        if lat_scene.get("meshes", 0) < 1:
+            bad(f"晶格未加入场景（预览可能加载失败）：{lat_scene}")
+        elif px.get("teal", 0) > 0.005:
+            ok(f"晶格已渲染：{lat_scene['tris']:,} 三角形，青绿像素 {px['teal'] * 100:.2f}%")
         else:
-            bad(f"晶格未渲染（teal={px.get('teal')}）：{px}")
+            bad(f"晶格未渲染（teal={px.get('teal')}）：场景={lat_scene} 像素={px}")
 
         # 视图切换 / 线框
         for view in ("overlay", "original", "lattice"):
@@ -247,6 +292,12 @@ def main() -> int:
 
         # Chromium 会把"响应体被流式读取后正常关闭"的请求也标成 ERR_ABORTED，
         # 数据其实完整拿到了，因此只把非 ERR_ABORTED 的失败当成问题。
+        # 任何 4xx/5xx 都算失败：GLB 预览失败只会弹一句 toast，容易被忽略
+        if not bad_responses:
+            ok("所有请求都返回 2xx（含 GLB 预览）")
+        else:
+            bad(f"存在非 2xx 响应：{bad_responses[:4]}")
+
         real_failed = [
             u for u in dict.fromkeys(failed + lattice_failed)
             if "/favicon" not in u and "ERR_ABORTED" not in u

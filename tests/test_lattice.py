@@ -255,6 +255,24 @@ def test_lattice_from_cycloid_api() -> None:
     client.delete(f"/api/lattice/jobs/{job['id']}")
 
 
+def test_preview_accepts_any_version_token() -> None:
+    """回归：`v` 是缓存穿透标记，前端传的是复合值（如 ``3-1793264757956``）。
+
+    早期把它声明成 ``int``，FastAPI 对这类值直接返回 422，用户在界面上只会看到
+    「预览加载失败」——而 422 不抛 JS 异常、也不触发 requestfailed，很难被发现。
+    """
+    created = client.post("/api/lattice/samples/cube")
+    job_id = created.json()["id"]
+    wait_for_job(job_id, ("ready",))
+
+    for token in ("0", "3", "3-1793264757956", "1.5", "abc"):
+        r = client.get(f"/api/lattice/jobs/{job_id}/preview/original?v={token}")
+        assert r.status_code == 200, f"v={token!r} 返回 {r.status_code}：{r.text[:200]}"
+        assert r.content[:4] == b"glTF", f"v={token!r} 响应不是 GLB"
+
+    client.delete(f"/api/lattice/jobs/{job_id}")
+
+
 def test_lattice_rejects_bad_upload() -> None:
     """非法格式与空文件都要给中文错误。"""
     bad = client.post(
