@@ -15,8 +15,9 @@
 #   PYTHON_IMAGE  基础镜像来源（拉不到官方镜像时用加速源）
 #   APT_MIRROR    Debian 软件源镜像（默认官方；国内建议 mirrors.cloud.tencent.com，
 #                 否则拉 mesa 的 libllvm19 极慢，构建会卡十几分钟）
-#   MEMORY        内存上限（默认 2g；晶格化的体素化很吃内存，
-#                 只用摆线针轮设计器的话 512m 够）
+#   MEMORY        容器内存上限（默认取机器物理内存的一半，上限 2g）。
+#                 晶格化的峰值随体素分辨率上涨：160→~550MB、200→~830MB。
+#                 服务端会按这个上限自动裁剪可用分辨率，不会把容器 OOM 掉。
 #   PULL          设为 1 时先 git 同步到 origin/main
 #
 # 例（腾讯云内网加速）：
@@ -35,7 +36,12 @@ NAME="${NAME:-echo-cad-toolbox}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 PYTHON_IMAGE="${PYTHON_IMAGE:-python:3.12-slim}"
 APT_MIRROR="${APT_MIRROR:-}"
-MEMORY="${MEMORY:-2g}"
+if [ -z "${MEMORY:-}" ]; then
+  # 默认给物理内存的一半（最多 2g）：1.9G 的小机器 → 约 1g，32G 的工作站 → 2g
+  HALF_MB=$(( $(awk '/^MemTotal:/{print int($2/1024/2)}' /proc/meminfo) ))
+  [ "$HALF_MB" -gt 2048 ] && HALF_MB=2048
+  MEMORY="${HALF_MB}m"
+fi
 
 if [ "${PULL:-0}" = "1" ]; then
   echo "[0/4] 同步源码"

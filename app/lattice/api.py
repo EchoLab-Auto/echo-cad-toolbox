@@ -15,7 +15,7 @@ from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..geometry import CycloidParams
-from . import meshio, pipeline
+from . import meshio, pipeline, resources
 from .cycloid import DEFAULT_DISC_WIDTH, CycloidSolidError, build_disc_mesh, describe
 from .jobs import JobError, JobStore, sample_meshes
 
@@ -58,6 +58,8 @@ def config() -> dict[str, Any]:
             "min_width": 1.0,
             "max_width": 120.0,
         },
+        # 本机能力：前端据此禁用超出内存承受范围的分辨率
+        "resources": resources.summary(),
     }
 
 

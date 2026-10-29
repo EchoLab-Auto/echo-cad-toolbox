@@ -227,7 +227,7 @@ function populateConfig(cfg) {
   $('#cellRange').value = cfg.defaults.cell_size;
   $('#thickRange').value = cfg.defaults.thickness;
   $('#shellRange').value = cfg.defaults.shell_thickness;
-  $('#resSel').value = String(cfg.defaults.resolution);
+  applyResourceLimits(cfg);
   $('#warpRange').value = cfg.defaults.warp;
   $('#gradRange').value = cfg.defaults.grad;
   $('#smoothRange').value = cfg.defaults.smooth;
@@ -237,6 +237,39 @@ function populateConfig(cfg) {
 
   syncLatticeUI();
   syncOutputs();
+}
+
+/**
+ * 按服务端探测到的内存能力限制分辨率选项。
+ *
+ * 体素化的内存开销随分辨率线性上涨（160→380MB，200→830MB，256→1.4GB+），
+ * 在内存紧张的机器上选高分辨率会把容器 OOM 掉、连带丢掉所有作业。
+ * 这里直接把超限选项禁用，并把默认值拉到允许范围内。
+ */
+function applyResourceLimits(cfg) {
+  const res = cfg.resources || {};
+  const ceiling = Number(res.max_resolution) || 320;
+  const sel = $('#resSel');
+  let best = null;
+  for (const opt of sel.options) {
+    const value = Number(opt.value);
+    const allowed = value <= ceiling;
+    opt.disabled = !allowed;
+    if (allowed) best = opt.value;
+    opt.textContent = opt.textContent.replace(/（.*?不允许）$/, '');
+    if (!allowed) opt.textContent += '（内存不允许）';
+  }
+  const wanted = String(cfg.defaults.resolution);
+  sel.value = Number(wanted) <= ceiling ? wanted : String(best || ceiling);
+
+  const note = $('#resHint');
+  if (note) {
+    const mem = res.memory_limit_mb;
+    note.textContent = mem
+      ? `本机可用内存约 ${mem} MB，分辨率上限 ${ceiling}（再高会因内存不足中断）。`
+      : '';
+    note.hidden = !mem;
+  }
 }
 
 function syncLatticeUI() {

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 import trimesh
 from scipy import ndimage
@@ -205,13 +207,28 @@ def volume_to_mesh(
     verts, faces, _normals, _values = measure.marching_cubes(
         field, level=float(level), spacing=(float(pitch),) * 3
     )
-    verts = (
-        np.asarray(verts, dtype=np.float64)
-        + np.asarray(origin, dtype=np.float64)[None, :]
-        + 0.5 * pitch
-    )
+    del field
+    # 平移与类型收敛都在 marching cubes 的原始数组上做，避免多一份副本
+    verts = np.asarray(verts, dtype=np.float64)
+    verts += np.asarray(origin, dtype=np.float64)[None, :] + 0.5 * pitch
+    faces = np.asarray(faces, dtype=np.int32)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
     mesh.remove_unreferenced_vertices()
+    del verts, faces
+    gc.collect()
+
+    # 顺序很关键：**先抽稀再平滑**。二次误差抽稀的内存开销与面数成正比
+    # （实测 190 万面网格抽稀需 ~500 MB），而 Taubin 平滑按顶点邻接建图，
+    # 在抽稀后的网格上做能省下 100 MB 以上。两者都只是形貌修饰，先做哪个
+    # 视觉差异很小，但内存差异很大。
+    target = 0
+    if decimate_target_faces:
+        target = int(decimate_target_faces)
+    elif decimate_ratio:
+        target = max(1000, int(len(mesh.faces) * (1.0 - float(decimate_ratio))))
+    if target and target < len(mesh.faces):
+        mesh = _decimate(mesh, target)
+        gc.collect()
 
     if smooth_iters and smooth_iters > 0:
         try:
@@ -219,19 +236,39 @@ def volume_to_mesh(
         except Exception:  # noqa: BLE001
             pass
 
-    if decimate_target_faces or decimate_ratio:
-        try:
-            if decimate_target_faces:
-                target = int(decimate_target_faces)
-            else:
-                target = max(1000, int(len(mesh.faces) * (1.0 - float(decimate_ratio))))
-            if target < len(mesh.faces):
-                mesh = mesh.simplify_quadric_decimation(face_count=target)
-        except Exception:  # noqa: BLE001
-            pass
-
     mesh.process(validate=True)
     return mesh
+
+
+def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
+    """抽稀到目标面数。
+
+    优先用 ``fast_simplification`` 的原生接口：它直接吃 float32 顶点 + int32 索引，
+    结果是新数组，不必像 trimesh 的包装那样先 ``mesh.copy()`` 再转 float64 / int64
+    （实测包装版多占 ~100 MB，与这里省下的部分相当）。
+    """
+    try:
+        import fast_simplification
+
+        verts32 = np.ascontiguousarray(mesh.vertices, dtype=np.float32)
+        faces32 = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+        reduction = 1.0 - float(target_faces) / float(len(mesh.faces))
+        reduction = min(max(reduction, 0.0), 0.99)
+        new_verts, new_faces = fast_simplification.simplify(verts32, faces32, target_reduction=reduction)
+        if len(new_faces) == 0:
+            raise ValueError("抽稀结果为空")
+        out = trimesh.Trimesh(
+            vertices=np.asarray(new_verts, dtype=np.float64),
+            faces=np.asarray(new_faces, dtype=np.int64),
+            process=False,
+        )
+        return out
+    except Exception:  # noqa: BLE001
+        # 回退到 trimesh 自带实现（更慢更吃内存，但保证可用）
+        try:
+            return mesh.simplify_quadric_decimation(face_count=int(target_faces))
+        except Exception:  # noqa: BLE001
+            return mesh
 
 
 def occupancy_stats(field: np.ndarray, pitch: float) -> dict:

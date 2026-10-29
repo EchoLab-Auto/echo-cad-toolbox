@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import json
 import os
 import shutil
@@ -27,7 +29,7 @@ from pathlib import Path
 import trimesh
 
 from . import meshio as io_mesh
-from . import pipeline
+from . import pipeline, resources
 from . import voxel as fld
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +43,20 @@ JOB_TTL_SECONDS = 24 * 3600
 
 class JobError(RuntimeError):
     """作业层错误（可直接展示给用户）。"""
+
+
+def release_memory() -> None:
+    """把已释放的堆内存还给操作系统。
+
+    CPython 释放大数组后，glibc 往往只把内存留在 arena 里不归还 OS，导致
+    进程 RSS 单调上涨直到撞上容器内存上限被 OOM 杀掉（重启会丢掉所有作业）。
+    晶格化一次要分配几百 MB，所以每完成一个任务就主动 ``malloc_trim`` 一次。
+    """
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # 非 glibc 平台（musl / macOS）没有这个符号，忽略
 
 
 class Job:
@@ -129,7 +145,9 @@ class Job:
 
 
 class JobStore:
-    def __init__(self, workers: int = 2):
+    def __init__(self, workers: int | None = None):
+        if workers is None:
+            workers = int(os.environ.get("LATTICE_WORKERS", "2"))
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lattice")
@@ -257,6 +275,9 @@ class JobStore:
             if job.status in ("running", "preparing"):
                 raise JobError("已有任务在执行，请稍候")
         params = pipeline.normalize_params(raw_params)
+        # 体素分辨率不能超过本机内存能承受的上限，否则会把容器 OOM 掉
+        ceiling = resources.max_resolution()[0]
+        params["resolution"] = min(params["resolution"], ceiling)
         job.set_state(
             status="running", progress=0.0, stage="排队", error=None, params=params
         )
@@ -296,6 +317,8 @@ class JobStore:
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             job.set_state(status="error", error=str(exc), stage="生成失败", progress=0.0)
+        finally:
+            release_memory()
 
     def _ensure_volume(self, job: Job, resolution: int) -> dict:
         if job.volume_path.exists() and job.resolution == resolution:

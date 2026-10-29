@@ -17,7 +17,7 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from app.geometry import CycloidParams
-from app.lattice import meshio, pipeline, voxel
+from app.lattice import meshio, pipeline, resources, voxel
 from app.lattice.cycloid import build_disc_mesh
 from app.main import app
 
@@ -92,6 +92,46 @@ def test_warp_and_grad_stay_connected() -> None:
     )
     assert open_edges(result.mesh) == 0
     assert len(result.mesh.split(only_watertight=False)) == 1
+
+
+def test_memory_ceiling_is_detected() -> None:
+    """分辨率上限必须能被探测出来，且落在参数允许范围内。"""
+    ceiling, limit = resources.max_resolution()
+    assert 48 <= ceiling <= resources.MAX_RESOLUTION_HARD_LIMIT
+    assert limit is None or limit > 0
+    info = resources.summary()
+    assert info["max_resolution"] == ceiling
+    assert info["workers"] >= 1
+
+
+def test_resolution_is_clamped_to_memory_ceiling() -> None:
+    """超过本机内存承受范围的分辨率要被裁到上限（否则容器会被 OOM）。"""
+    job = client.post("/api/lattice/samples/cube").json()
+    job_id = job["id"]
+    wait_for_job(job_id, ("ready",))
+
+    ceiling = resources.max_resolution()[0]
+    accepted = client.post(
+        f"/api/lattice/jobs/{job_id}/generate",
+        json={"lattice": "bcc", "cell_size": 12, "thickness": 2.0, "resolution": 320},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["params"]["resolution"] <= ceiling, "分辨率没有被裁到内存上限"
+
+    state = wait_for_job(job_id, ("done",), timeout=300.0)
+    assert state["status"] == "done", state
+    client.delete(f"/api/lattice/jobs/{job_id}")
+
+
+def test_decimate_then_smooth_keeps_mesh_valid() -> None:
+    """抽稀在平滑之前：结果仍要闭合，且面数确实下降。"""
+    vol = box_volume(96)
+    raw = pipeline.build(vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": 1.0,
+                               "resolution": 96, "decimate": 0.0, "smooth": 0})
+    thin = pipeline.build(vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": 1.0,
+                                "resolution": 96, "decimate": 0.6, "smooth": 1})
+    assert thin.stats["faces"] < raw.stats["faces"] * 0.6, "抽稀没有生效"
+    assert open_edges(thin.mesh) == 0, "抽稀+平滑后网格出现开口"
 
 
 def test_param_normalization() -> None:

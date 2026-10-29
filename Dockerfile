@@ -37,7 +37,10 @@ ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     PORT=8080 \
     # ezdxf 会把字体缓存写到 ~/.cache，容器里 HOME 不可写会刷警告
-    XDG_CACHE_HOME=/app/data/.cache
+    XDG_CACHE_HOME=/app/data/.cache \
+    # 限制 glibc 每线程 arena 数量：晶格化会在线程池里分配大量临时数组，
+    # 默认 arena 会让 RSS 虚高、且释放后难以归还（配合 jobs.release_memory）
+    MALLOC_ARENA_MAX=2
 
 # gmsh 的 libgmsh.so 链接了 OpenGL / X11 / freetype（只用 OCC 曲面离散、不开 GUI，
 # 但动态链接阶段仍然要能找到这些 .so），这里一次装齐。
