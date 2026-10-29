@@ -11,5 +11,10 @@ __pycache__/
 .mypy_cache
 docs/screenshots/*.tmp
 *.dxf
+*.glb
+*.stl
+*.3mf
+*.ply
+data/
 *.log
 .DS_Store

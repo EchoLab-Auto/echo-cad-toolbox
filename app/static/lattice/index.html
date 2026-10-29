@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>晶格化工作台 · echo-cad-toolbox</title>
+<meta name="description" content="把 STL / STEP 实体转成晶格结构：gyroid / Schwarz P / Diamond 等 TPMS 与 BCC / FCC / Octet 桁架，实时预览并导出 STL / 3MF / OBJ / PLY。" />
+<link rel="icon" href="/static/favicon.svg" />
+<link rel="stylesheet" href="/static/lattice/style.css" />
+<script type="importmap">
+{ "imports": { "three": "/static/lattice/vendor/three/build/three.module.js" } }
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="22" height="22">
+        <path d="M4 10.5 16 4l12 6.5v11L16 28 4 21.5z" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".55"/>
+        <path d="M4 10.5 16 17l12-6.5M16 17v11" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
+        <circle cx="10" cy="13.7" r="1.5" fill="currentColor"/>
+        <circle cx="22" cy="13.7" r="1.5" fill="currentColor"/>
+        <circle cx="16" cy="22.5" r="1.5" fill="currentColor"/>
+      </svg>
+    </span>
+    <div class="titles">
+      <h1>晶格化工作台</h1>
+      <p>STL / STEP → 晶格结构 · TPMS 与桁架 · 实时预览与导出</p>
+    </div>
+  </div>
+
+  <div class="topbar-actions">
+    <nav class="toolnav" aria-label="工具切换">
+      <a href="/" title="摆线针轮轮廓生成与仿真器">摆线针轮设计</a>
+      <a href="/lattice" class="active" aria-current="page">晶格化</a>
+    </nav>
+
+    <div class="export-group">
+      <button class="btn primary" id="btnGenerate" disabled>
+        <span class="spinner" hidden></span><span class="btn-label">生成晶格</span>
+      </button>
+      <button class="btn" id="btnStl" disabled title="导出 STL">STL</button>
+      <button class="btn" id="btn3mf" disabled title="导出 3MF">3MF</button>
+      <button class="btn" id="btnObj" disabled title="导出 OBJ">OBJ</button>
+      <button class="btn" id="btnPly" disabled title="导出 PLY">PLY</button>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ------------------------------ 左：模型 / 参数 ------------------------------ -->
+  <aside class="panel panel-left" aria-label="模型与晶格参数">
+
+    <section class="group">
+      <div class="group-head"><span class="dot"></span>模型来源</div>
+
+      <div class="seg seg-full" id="sourceSeg">
+        <button data-source="cycloid" class="active">摆线轮盘</button>
+        <button data-source="upload">上传文件</button>
+      </div>
+
+      <!-- 摆线轮盘 -->
+      <div id="cycloidSource" class="source-body">
+        <p class="hint" id="cycloidHint">按摆线针轮参数直接生成 3D 轮盘，免去导出建模。</p>
+
+        <div class="field">
+          <div class="label-row"><label for="czc">齿数 Zc</label><output id="czcOut">39</output></div>
+          <input type="range" id="czc" min="6" max="120" step="1" value="39" />
+        </div>
+        <div class="field">
+          <div class="label-row"><label for="ce">偏心距 e</label><output id="ceOut">1.43 mm</output></div>
+          <input type="range" id="ce" min="0.2" max="6" step="0.01" value="1.43" />
+        </div>
+        <div class="field">
+          <div class="label-row"><label for="crz">针齿中心圆 Rz</label><output id="crzOut">88.0 mm</output></div>
+          <input type="range" id="crz" min="10" max="400" step="0.5" value="88" />
+        </div>
+        <div class="field">
+          <div class="label-row"><label for="crp">针齿半径 rp</label><output id="crpOut">5.50 mm</output></div>
+          <input type="range" id="crp" min="0.5" max="30" step="0.1" value="5.5" />
+        </div>
+        <div class="field">
+          <div class="label-row"><label for="cwidth">盘厚</label><output id="cwidthOut">14.0 mm</output></div>
+          <input type="range" id="cwidth" min="2" max="80" step="1" value="14" />
+        </div>
+
+        <div class="kpi" id="cycloidKpi"></div>
+
+        <button class="btn wide" id="btnBuildCycloid">生成轮盘</button>
+        <p class="hint" id="cycloidFromUrl" hidden></p>
+      </div>
+
+      <!-- 上传 -->
+      <div id="uploadSource" class="source-body" hidden>
+        <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="上传模型">
+          <input type="file" id="fileInput" hidden
+                 accept=".stl,.step,.stp,.iges,.igs,.obj,.ply,.3mf,.glb,.gltf" />
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <strong>拖入模型，或点击选择</strong>
+          <span>STL · STEP · STP · IGES · OBJ · PLY · 3MF（≤200MB）</span>
+        </div>
+        <div class="samples">
+          <span class="samples-label">样例</span>
+          <button class="chip" data-sample="bracket">L 支架</button>
+          <button class="chip" data-sample="cube">立方体</button>
+          <button class="chip" data-sample="cylinder">圆柱</button>
+          <button class="chip" data-sample="sphere">球</button>
+          <button class="chip" data-sample="tube">空心管</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="group">
+      <div class="group-head"><span class="dot"></span>晶格参数</div>
+
+      <div class="field">
+        <label for="latticeSel">晶格类型</label>
+        <select id="latticeSel"></select>
+        <p class="hint" id="latticeDesc"></p>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label for="cellRange">单胞尺寸</label><output id="cellOut">10.0 mm</output></div>
+        <input type="range" id="cellRange" min="2" max="60" step="0.5" value="10" />
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label for="thickRange" id="thickLabel">壁厚</label><output id="thickOut">1.20 mm</output></div>
+        <input type="range" id="thickRange" min="0.2" max="12" step="0.1" value="1.2" />
+      </div>
+
+      <div class="field">
+        <label for="modeSel">应用方式</label>
+        <select id="modeSel"></select>
+        <p class="hint" id="modeDesc"></p>
+      </div>
+
+      <div class="field" id="shellField" hidden>
+        <div class="label-row"><label for="shellRange">壳层厚度</label><output id="shellOut">2.5 mm</output></div>
+        <input type="range" id="shellRange" min="0.5" max="30" step="0.5" value="2.5" />
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>相对密度预估</label><output id="densityPct">—</output></div>
+        <div class="density-bar"><i id="densityFill"></i></div>
+      </div>
+
+      <details class="advanced">
+        <summary>高级选项</summary>
+
+        <div class="field">
+          <div class="label-row"><label for="resSel">体素分辨率</label><output id="resOut">160</output></div>
+          <select id="resSel">
+            <option value="96">96（最快）</option>
+            <option value="128">128</option>
+            <option value="160" selected>160（推荐）</option>
+            <option value="200">200</option>
+            <option value="256">256（慢，精细）</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="wallSel">曲面填充方式</label>
+          <select id="wallSel">
+            <option value="sheet">薄壁（sheet）</option>
+            <option value="solid">实体骨架（solid）</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="switch"><input type="checkbox" id="skinChk" /><i></i><span>保留原始外表面壳</span></label>
+        </div>
+
+        <div class="field">
+          <div class="label-row"><label for="warpRange">域扭曲</label><output id="warpOut">0.00</output></div>
+          <input type="range" id="warpRange" min="0" max="0.5" step="0.01" value="0" />
+        </div>
+
+        <div class="field">
+          <div class="label-row"><label for="gradRange">Z 向渐变</label><output id="gradOut">0.00</output></div>
+          <input type="range" id="gradRange" min="-0.6" max="0.6" step="0.05" value="0" />
+        </div>
+
+        <div class="field">
+          <div class="label-row"><label for="smoothRange">平滑迭代</label><output id="smoothOut">1</output></div>
+          <input type="range" id="smoothRange" min="0" max="6" step="1" value="1" />
+        </div>
+
+        <div class="field">
+          <div class="label-row"><label for="decRange">抽稀比例</label><output id="decOut">30%</output></div>
+          <input type="range" id="decRange" min="0" max="0.9" step="0.05" value="0.3" />
+        </div>
+      </details>
+    </section>
+
+    <p class="foot-note">晶格以毫米为单位导出，可直接进切片软件或 CAE 前处理。</p>
+  </aside>
+
+  <!-- ------------------------------ 中：三维视图 ------------------------------ -->
+  <section class="stage">
+    <canvas id="canvas" tabindex="0" aria-label="晶格三维视图"></canvas>
+
+    <div class="hud hud-top">
+      <div class="seg" id="viewSeg">
+        <button data-view="original" class="active">原始</button>
+        <button data-view="lattice">晶格</button>
+        <button data-view="overlay">叠加</button>
+      </div>
+      <div class="seg">
+        <button class="icon-btn" id="wireBtn" title="线框">◇</button>
+        <button class="icon-btn" id="rotateBtn" title="自动旋转">⟳</button>
+        <button class="icon-btn" id="resetBtn" title="重置视角">⌖</button>
+      </div>
+    </div>
+
+    <div class="hud hud-bottom">
+      <span id="statusText">等待模型…</span>
+      <span id="statusRight" class="mono"></span>
+    </div>
+
+    <div class="progress-overlay" id="progressOverlay" hidden>
+      <div class="progress-box">
+        <p id="progressStage">准备中…</p>
+        <div class="progress-track"><i id="progressFill"></i></div>
+        <span id="progressPct">0%</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ------------------------------ 右：信息 / 结果 ------------------------------ -->
+  <aside class="panel panel-right" aria-label="模型信息与生成结果">
+    <section class="group" id="modelInfo" hidden>
+      <div class="group-head"><span class="dot"></span>当前模型
+        <button class="ghost-icon" id="clearBtn" title="关闭模型">✕</button>
+      </div>
+      <dl class="kv" id="modelKv"></dl>
+      <div class="warn" id="modelWarn" hidden></div>
+      <dl class="kv" id="cycloidInfo" hidden></dl>
+    </section>
+
+    <section class="group" id="statsPanel" hidden>
+      <div class="group-head"><span class="dot"></span>生成结果</div>
+      <dl class="kv" id="statsKv"></dl>
+    </section>
+
+    <section class="group" id="helpPanel">
+      <div class="group-head"><span class="dot"></span>参数怎么选</div>
+      <ul class="tips">
+        <li><b>单胞尺寸</b>先取零件最小特征尺寸的 1/5 ~ 1/3</li>
+        <li><b>壁厚 / 杆径</b> ≥ 2× 体素尺寸，FDM 打印别低于 0.8 mm</li>
+        <li><b>分辨率</b>先用 128~160 试排版，定稿再上 200~256</li>
+        <li><b>摆线轮盘</b>建议先只填齿根圆以内的区域（壳内填充）</li>
+      </ul>
+    </section>
+  </aside>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<script type="module" src="/static/lattice/app.js"></script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>摆线针轮轮廓生成与仿真器 · echo-cad-toolbox</title>
-<meta name="description" content="交互式摆线针轮（RV 减速器）齿廓生成器：解析短幅外摆线、运动学仿真、接触分析、DXF 导出。" />
+<meta name="description" content="交互式摆线针轮（RV 减速器）齿廓生成器：解析短幅外摆线、运动学仿真、接触分析、DXF 导出；并可一键把轮盘做成晶格减重结构。" />
 <link rel="icon" href="/static/favicon.svg" />
 <link rel="stylesheet" href="/static/style.css" />
 </head>
@@ -24,6 +24,10 @@
     </div>
   </div>
   <div class="topbar-actions">
+    <nav class="toolnav" aria-label="工具切换">
+      <a href="/" class="active" aria-current="page">摆线针轮设计</a>
+      <a href="/lattice" title="把实体转成晶格结构（减重）">晶格化</a>
+    </nav>
     <label class="preset-wrap">
       <span>预设</span>
       <select id="presetSelect"></select>
@@ -35,6 +39,7 @@
       <button class="btn" id="btnSvg">SVG</button>
       <button class="btn" id="btnPng">PNG</button>
       <button class="btn" id="btnJson" title="参数与派生量存档">JSON</button>
+      <button class="btn" id="btnLattice" title="用当前参数生成盘体并做晶格减重">晶格化 →</button>
     </div>
   </div>
 </header>

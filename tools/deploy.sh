@@ -9,11 +9,12 @@
 #
 # 环境变量：
 #   PORT          宿主机端口（默认 8080）
-#   IMAGE         镜像标签（默认 echo-cad-toolbox:1.0.0）
+#   IMAGE         镜像标签（默认 echo-cad-toolbox:1.1.0）
 #   NAME          容器名（默认 echo-cad-toolbox）
 #   PIP_INDEX_URL PyPI 镜像，**必须**通过 --build-arg 传递（Dockerfile 里是 ARG）
 #   PYTHON_IMAGE  基础镜像来源（拉不到官方镜像时用加速源）
-#   MEMORY        内存上限（默认 512m）
+#   MEMORY        内存上限（默认 2g；晶格化的体素化很吃内存，
+#                 只用摆线针轮设计器的话 512m 够）
 #   PULL          设为 1 时先 git 同步到 origin/main
 #
 # 例（腾讯云内网加速）：
@@ -24,11 +25,11 @@ set -e
 cd "$(dirname "$0")/.."
 
 PORT="${1:-${PORT:-8080}}"
-IMAGE="${IMAGE:-echo-cad-toolbox:1.0.0}"
+IMAGE="${IMAGE:-echo-cad-toolbox:1.1.0}"
 NAME="${NAME:-echo-cad-toolbox}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 PYTHON_IMAGE="${PYTHON_IMAGE:-python:3.12-slim}"
-MEMORY="${MEMORY:-512m}"
+MEMORY="${MEMORY:-2g}"
 
 if [ "${PULL:-0}" = "1" ]; then
   echo "[0/4] 同步源码"
@@ -47,11 +48,15 @@ docker build \
 
 echo "[2/4] 替换容器 $NAME（宿主机 :$PORT -> 容器 :8080）"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+# 晶格化作业产物放在 data 卷里，容器重建不丢（纯设计器用法可省略）
+docker volume create "${NAME}-data" >/dev/null 2>&1 || true
+
 docker run -d \
   --name "$NAME" \
   --restart unless-stopped \
   -p "$PORT:8080" \
   --memory "$MEMORY" \
+  -v "${NAME}-data:/app/data" \
   --label "app=$NAME" \
   "$IMAGE" >/dev/null
 echo "      容器已启动：$(docker inspect -f '{{.Id}}' "$NAME" | cut -c1-12)"

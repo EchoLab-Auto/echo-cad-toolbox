@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# echo-cad-toolbox —— 摆线针轮轮廓生成与仿真器
+# echo-cad-toolbox —— 摆线针轮轮廓设计器 + 晶格化工作台
 #
 # 多阶段构建：先在 builder 中安装依赖并预编译，再把纯净的运行环境复制到
 # 最终镜像，镜像体积小、无编译工具链。
@@ -28,14 +28,26 @@ RUN python -m venv /opt/venv \
 FROM ${PYTHON_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="echo-cad-toolbox" \
-      org.opencontainers.image.description="Cycloidal pin-wheel profile generator, simulator and DXF exporter" \
+      org.opencontainers.image.description="Cycloidal pin-wheel designer (profile/simulation/DXF) + lattice infill workbench (STL/STEP to lattice)" \
       org.opencontainers.image.licenses="MIT"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     HOST=0.0.0.0 \
-    PORT=8080
+    PORT=8080 \
+    # ezdxf 会把字体缓存写到 ~/.cache，容器里 HOME 不可写会刷警告
+    XDG_CACHE_HOME=/app/data/.cache
+
+# gmsh 的 libgmsh.so 链接了 OpenGL / X11 / freetype（只用 OCC 曲面离散、不开 GUI，
+# 但动态链接阶段仍然要能找到这些 .so），这里一次装齐。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 libglu1-mesa libglx-mesa0 libopengl0 \
+        libx11-6 libxext6 libxrender1 libxfixes3 libxcursor1 libxinerama1 \
+        libxft2 libfontconfig1 libfreetype6 libpng16-16 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # 非 root 运行
 RUN groupadd --system --gid 1001 app \
@@ -44,6 +56,10 @@ RUN groupadd --system --gid 1001 app \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
+# 晶格化作业的产物目录（数据卷可挂到这里；容器重启后旧作业仍留在磁盘）
+RUN mkdir -p /app/data/lattice_jobs /app/data/.cache && chown -R app:app /app/data
+VOLUME ["/app/data"]
+
 COPY --chown=app:app app ./app
 COPY --chown=app:app tests ./tests
 COPY --chown=app:app pyproject.toml README.md ./

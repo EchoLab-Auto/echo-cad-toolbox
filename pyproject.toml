@@ -1,7 +1,7 @@
 [project]
 name = "echo-cad-toolbox"
-version = "1.0.0"
-description = "Interactive cycloidal (pin-wheel) profile generator, simulator and DXF exporter"
+version = "1.1.0"
+description = "Cycloidal pin-wheel designer (profile, simulation, DXF) + lattice infill workbench"
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
@@ -14,3 +14,13 @@ addopts = "-q"
 [tool.ruff]
 line-length = 110
 target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+# 数值/几何代码里短暂变量与下标名较多
+"app/lattice/*.py" = [
+    "N803", "N806",
+    # FastAPI 的 File()/Body() 作为默认值是官方写法
+    "B008",
+    # 网格修复、插件式清理等多处是「尽力而为」，失败就跳过（已在上层记日志）
+    "S110",
+]

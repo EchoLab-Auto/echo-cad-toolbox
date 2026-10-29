@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# 本地临时依赖目录（可选：pip install --target .pylibs -r requirements.txt）
+.pylibs/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -15,6 +17,15 @@ venv/
 out/
 dist/
 *.log
+
+# 晶格化作业的临时产物
+data/lattice_jobs/
+data/uploads/
+*.glb
+*.stl
+*.3mf
+*.ply
+!app/static/**/*.stl
 
 # 编辑器
 .vscode/

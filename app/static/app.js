@@ -1035,6 +1035,18 @@ function bindEvents() {
   $('#btnPng').addEventListener('click', exportPng);
   $('#btnJson').addEventListener('click', exportJson);
 
+  // 把当前齿廓参数带到晶格化工作台（同一套 ?p= 分享令牌）
+  $('#btnLattice').addEventListener('click', () => {
+    const keep = ['tooth_count', 'eccentricity', 'pin_circle_radius', 'pin_radius',
+      'equidistant_offset', 'radial_offset', 'pin_hole_count', 'pin_hole_circle_radius',
+      'pin_sleeve_radius', 'clearance', 'center_bore_radius'];
+    const subset = {};
+    for (const key of keep) {
+      if (state.params[key] !== undefined) subset[key] = state.params[key];
+    }
+    location.href = `/lattice?p=${encodeParams(subset)}`;
+  });
+
   // --- 键盘 ---
   window.addEventListener('keydown', (ev) => {
     if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLSelectElement) return;

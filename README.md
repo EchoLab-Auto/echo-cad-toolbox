@@ -1,8 +1,16 @@
 # echo-cad-toolbox
 
-**摆线针轮轮廓生成与可视化仿真器** —— 一个可部署在 Docker 中的 Web 工具：交互式生成摆线针轮
-（RV / 摆线针轮减速器）齿廓、实时运动学仿真、啮合接触分析，并导出**毫米级 DXF 图纸**用于
-CNC / 线切割 / 激光加工。
+**摆线针轮设计器 + 晶格化工作台** —— 一个可部署在 Docker 中的 Web 工具箱，两个工具共用一套
+后端与前端风格：
+
+| 工具 | 路径 | 做什么 |
+| --- | --- | --- |
+| **摆线针轮设计器** | `/` | 交互式生成摆线针轮（RV / 摆线针轮减速器）齿廓、实时运动学仿真、啮合接触分析，导出**毫米级 DXF 图纸** |
+| **晶格化工作台** | `/lattice` | 把 STL / STEP 实体转成**晶格结构**（gyroid / Schwarz P / Diamond 等 TPMS 与 BCC / FCC / Octet 桁架），实时三维预览并导出 STL / 3MF / OBJ / PLY |
+
+两个工具是**打通**的：设计器顶栏的「晶格化 →」会把当前齿廓参数带过去，晶格化工作台直接按参数
+生成 3D 摆线轮盘（齿廓拉伸 + 柱销孔 + 中心孔），再做成减重晶格 —— 从齿形设计到轻量化打印件
+不需要中间导出建模。
 
 ![界面](docs/screenshot.png)
 
@@ -79,7 +87,12 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-访问 <http://localhost:8080>；API 文档在 <http://localhost:8080/docs>。
+访问 <http://localhost:8080>（摆线针轮设计器）与 <http://localhost:8080/lattice>（晶格化工作台）；
+API 文档在 <http://localhost:8080/docs>（晶格化接口在 `/api/lattice/*`）。
+
+> 晶格化需要 `gmsh` 的 OCC 内核做 STEP 离散，`libgmsh.so` 在动态链接阶段依赖
+> OpenGL / X11 / freetype。Linux 桌面版一般已具备；无桌面的服务器需要装：
+> `apt install libgl1 libglu1-mesa libx11-6 libxft2 libfontconfig1`（Dockerfile 里已处理）。
 
 ### 已部署实例
 
@@ -146,6 +159,21 @@ python -m app.cli --parts assembly -o asm.dxf                            # 装�
 | **DXF 导出** | 毫米单位 1:1，分层（PROFILE/THEORY/PIN/HOLE/…），单零件或分件排布 |
 | **SVG / PNG / JSON** | 矢量预览、界面截图、参数与派生量存档 |
 | **分享链接** | 参数编码进 URL，一键复制 |
+| **一键晶格化** | 把当前齿廓参数带到晶格化工作台，直接生成减重轮盘 |
+
+### 晶格化工作台（`/lattice`）
+
+| 功能 | 说明 |
+| --- | --- |
+| **CAD 原生输入** | STEP / STP / IGES 用 gmsh 的 OCC 内核离散（子进程隔离）；STL / OBJ / PLY / 3MF / GLB 直接读；载入后自动去重、修法向、补洞 |
+| **摆线轮盘直出** | 只填 4 个摆线参数即可得到带柱销孔与中心孔的 3D 轮盘，省掉「导出 DXF → 建模 → 导出 STL」 |
+| **9 种晶格** | gyroid / Schwarz P / Diamond / IWP（TPMS 薄壁或实体骨架）+ SC / Grid / BCC / FCC / Octet（杆系桁架） |
+| **4 种应用方式** | 内部填充、仅表层壳内填充、挖减重腔、外扩融合；可叠加「保留原始外表皮」 |
+| **毫米级厚度** | TPMS 用归一化梯度 `s/\|∇s\|` 换算真实距离场，壁厚/杆径按 mm 直接给，任意单胞尺寸都均匀 |
+| **有机形态** | 域扭曲让晶格走向自然；Z 向渐变让单胞尺寸沿高度连续变化 |
+| **参数可控** | 体素分辨率 48 ~ 320、平滑迭代、抽稀比例，面数与精度自己权衡 |
+| **三维预览** | 原始 / 晶格 / 叠加三视图、线框、自动旋转、适配视角 |
+| **导出** | STL / 3MF / OBJ / PLY，单位毫米，直接进切片软件或 CAE 前处理 |
 
 ---
 
@@ -240,6 +268,37 @@ curl -OJ "localhost:8080/api/export/dxf?tooth_count=39&eccentricity=1.43&pin_cir
 
 ---
 
+### 晶格化接口（`/api/lattice/*`）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/lattice/health` | 健康检查 |
+| GET | `/api/lattice/config` | 晶格类型、应用方式、默认参数与区间、支持格式、摆线轮盘默认值 |
+| POST | `/api/lattice/jobs` | `multipart/form-data` 上传 `file`（STL/STEP/IGES/OBJ/PLY/3MF/GLB） |
+| POST | `/api/lattice/jobs/from-cycloid` | 传摆线参数直接生成 3D 轮盘并建作业 |
+| POST | `/api/lattice/samples/{name}` | 内置样例：cube / sphere / cylinder / bracket / tube |
+| GET | `/api/lattice/jobs/{id}` | 作业状态（`status` / `progress` / `stage` / `stats`） |
+| POST | `/api/lattice/jobs/{id}/generate` | 传晶格参数，后台生成 |
+| GET | `/api/lattice/jobs/{id}/preview/{original,lattice}` | GLB 预览 |
+| GET | `/api/lattice/jobs/{id}/download/{stl,3mf,obj,ply}` | 下载产物 |
+| DELETE | `/api/lattice/jobs/{id}` | 删除作业 |
+
+作业状态机：`new → preparing（体素化）→ ready → running（生成）→ done | error`。
+
+```bash
+# 由摆线参数直接生成轮盘并建作业
+curl -s -X POST http://localhost:8080/api/lattice/jobs/from-cycloid \
+  -H 'Content-Type: application/json' \
+  -d '{"params":{"tooth_count":39,"eccentricity":1.43,"pin_circle_radius":88,"pin_radius":5.5},"width":14}'
+
+# 生成 gyroid 填充（返回的 id 换成上一步的）
+curl -s -X POST http://localhost:8080/api/lattice/jobs/<id>/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"lattice":"gyroid","cell_size":10,"thickness":1.2,"mode":"shell","shell_thickness":3}'
+```
+
+---
+
 ## 5. DXF 图层
 
 | 图层 | 内容 | 颜色 |
@@ -261,21 +320,35 @@ curl -OJ "localhost:8080/api/export/dxf?tooth_count=39&eccentricity=1.43&pin_cir
 ```
 echo-cad-toolbox/
 ├── app/
-│   ├── geometry.py     # 几何核心：参数、齿廓解析式、运动学、接触、诊断
+│   ├── geometry.py     # 摆线几何核心：参数、齿廓解析式、运动学、接触、诊断
 │   ├── dxf_export.py   # DXF 构建（ezdxf，多图层 / 分件排布）
 │   ├── svg_export.py   # SVG 预览图
-│   ├── api.py          # FastAPI 路由与校验模型
-│   ├── main.py         # 应用装配、静态资源、GZip
+│   ├── api.py          # 摆线针轮的 FastAPI 路由与校验模型
+│   ├── main.py         # 应用装配：挂载两套路由与静态资源
 │   ├── cli.py          # 命令行出图
-│   └── static/         # 前端（原生 JS + Canvas，无构建步骤）
-├── tests/              # pytest：几何 / API / DXF
+│   ├── lattice/        # ★ 晶格化工作台（后端）
+│   │   ├── implicit.py     #   晶格隐式场：TPMS 解析梯度 / 杆系立方对称折叠
+│   │   ├── voxel.py        #   射线体素化 + EDT-SDF + marching cubes
+│   │   ├── meshio.py       #   STL/STEP 读写、gmsh 子进程离散、导出
+│   │   ├── pipeline.py     #   参数校验 → 场组合 → 网格化 → 统计
+│   │   ├── jobs.py         #   作业层：上传 / 体素缓存 / 后台生成 / 产物
+│   │   ├── cycloid.py      #   摆线齿廓 → 3D 轮盘实体（两工具衔接点）
+│   │   └── api.py          #   /api/lattice 路由
+│   └── static/         # 前端（原生 JS，无构建步骤）
+│       ├── index.html / app.js / style.css    # 摆线针轮设计器（2D Canvas）
+│       └── lattice/                            # 晶格化工作台（three.js）
+│           ├── index.html / app.js / style.css
+│           └── vendor/three/                   # three.js 本地副本（离线可用）
+├── tests/              # pytest：几何 / API / DXF / 晶格化
 ├── tools/
-│   ├── browser_check.py    # 无头浏览器端到端检查（JS 错误 + 画布像素）
+│   ├── browser_check.py    # 摆线设计器的无头浏览器检查（JS 错误 + 画布像素）
+│   ├── lattice_check.py    # 晶格化工作台的无头浏览器检查（含真实生成流程）
 │   ├── lan_check.py        # 局域网可访问性自检（列出可分享地址）
-│   └── deploy.sh           # 服务器一键部署（纯 docker，无 compose 也能跑）
+│   ├── deploy.sh           # 服务器一键部署（纯 docker，无 compose 也能跑）
 │   └── shoot.py            # 生成 README 配图
 ├── Dockerfile          # 多阶段构建，非 root 运行，内置 HEALTHCHECK
-└── docker-compose.yml
+├── docker-compose.yml
+└── data/lattice_jobs/  # 晶格化作业产物（容器里挂 data 卷；已在 .gitignore）
 ```
 
 ---
@@ -284,11 +357,12 @@ echo-cad-toolbox/
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                     # 39 项单元 / 接口测试
+python -m pytest -q                     # 66 项单元 / 接口测试（含 27 项晶格化）
 
 # 端到端（需先启动服务；会捕获 JS 错误并做画布像素统计）
 playwright install chromium
-python tools/browser_check.py http://127.0.0.1:8080/
+python tools/browser_check.py http://127.0.0.1:8080/      # 摆线设计器
+python tools/lattice_check.py http://127.0.0.1:8080/      # 晶格化工作台
 
 # 重新生成 README 配图
 python tools/shoot.py http://127.0.0.1:8080/
@@ -308,6 +382,38 @@ python tools/shoot.py http://127.0.0.1:8080/
 - 导出的 `PROFILE` 图层为闭合多段线，可直接用于 2.5D 轮廓加工；若需 G2/G3 圆弧，
   建议在 CAM 中做「拟合圆弧」。
 - 摆线轮与针齿理论上是**多齿同时啮合**，视图中全部接触点都会显示。
+
+### 晶格化怎么调
+
+| 参数 | 建议 |
+| --- | --- |
+| 单胞尺寸 | 先取零件最小特征尺寸的 1/5 ~ 1/3；偏大撑不住，偏小打印不出来 |
+| 壁厚 / 杆径 | ≥ 2 × 体素尺寸；FDM 打印别低于 0.8 mm |
+| 分辨率 | 先用 128 ~ 160 排版试错，定稿再上 200 ~ 256（256 约 1 GB 内存） |
+| 应用方式 | 承力件用「仅表层壳内填充」保留实心齿面；纯减重用「挖减重腔」 |
+| 抽稀 | 默认 30%；只做外观可以拉到 60%，要送 CAE 就设 0 |
+| 保留外表皮 | 想让零件「看起来还是原壳、里面是晶格」时打开 |
+
+性能参考（i7 级 CPU，单件）：
+
+| 场景 | 体素化 | 生成 | 面数 |
+| --- | --- | --- | --- |
+| 立方体 40×30×24 + gyroid（128） | 0.3 s | 2.0 s | 330 k |
+| L 支架 + gyroid（144） | 0.5 s | 1.5 s | 200 k |
+| 摆线轮盘 Zc=39 + gyroid 壳内填充（128） | 0.6 s | 1.1 s | 98 k |
+| STEP 带孔件 + gyroid（160） | 1.0 s | 4.8 s | 640 k |
+
+### 晶格化算法要点
+
+1. **体素化**：对每个 (x, y) 栅格列沿 −Z 发一条射线，收集与全部三角面的交点，排序后按
+   **奇偶规则**填充成占据栅格。比逐体素做包含性测试快一个量级，也不依赖拾取引擎的包围体实现。
+2. **SDF**：占据栅格做欧氏距离变换（EDT）得到内外距离，带 `0.5·pitch` 的体素中心修正，
+   使零等值面落在真实表面位置；再做边界保护（最外 1.6 层强制为外部），保证等值面在体场内闭合。
+3. **晶格场**：TPMS 用 `s/\|∇s\|`（解析梯度）把函数值换算成**真实距离**，所以壁厚是毫米直给；
+   杆系利用立方对称性把坐标折叠到单胞 1/8 象限，最近杆族收缩成 1~4 条代表线段求距离 —— 计算量
+   与单胞尺寸无关，且天然无断口。
+4. **组合**：按应用方式对实体 SDF 与晶格场取 `max` / `min`（隐式布尔），比网格布尔稳定得多。
+5. **网格化**：marching cubes → Taubin 平滑 → 二次误差抽稀 → 连通分量清理 → 补洞。
 
 ---
 

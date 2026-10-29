@@ -9,13 +9,16 @@ services:
         # 拉不到官方 python 镜像时可用加速源，例如
         # PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
-    image: echo-cad-toolbox:1.0.0
+    image: echo-cad-toolbox:1.1.0
     container_name: echo-cad-toolbox
     restart: unless-stopped
     ports:
       - "${PORT:-8080}:8080"
     environment:
       PORT: "8080"
+    volumes:
+      # 晶格化作业的产物（STL/GLB 预览缓存），不挂也不影响功能
+      - lattice-data:/app/data
     healthcheck:
       test:
         - CMD
@@ -26,9 +29,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    # 无状态服务，限制资源便于在边缘设备/工控机上运行
+    # 晶格化（体素化 + marching cubes）是内存/CPU 密集型：
+    # 256 分辨率约需 0.8~1.2 GB 峰值内存，按下限给足 2 GB；
+    # 边缘设备可降到 128 分辨率并把 memory 调回 768M。
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 512M
+          cpus: "4.0"
+          memory: 2G
+
+volumes:
+  lattice-data:
