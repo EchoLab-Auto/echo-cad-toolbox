@@ -91,11 +91,29 @@ def max_resolution() -> tuple[int, int | None]:
     return MAX_RESOLUTION_HARD_LIMIT, limit
 
 
+def default_workers() -> int:
+    """并行生成任务的线程数。
+
+    单个任务的峰值可达内存上限的 60~80%（实测 160 分辨率最坏 777 MB / 981 MB），
+    两个大任务叠加必然把容器撑爆，所以内存小的机器只跑一个。
+    """
+    env = os.environ.get("LATTICE_WORKERS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    limit = memory_limit()
+    if limit and limit <= 1536 * 1024**2:
+        return 1
+    return 2
+
+
 def summary() -> dict:
     """给前端用的能力说明。"""
     resolution, limit = max_resolution()
     return {
         "memory_limit_mb": round(limit / 1024**2) if limit else None,
         "max_resolution": resolution,
-        "workers": int(os.environ.get("LATTICE_WORKERS", "2")),
+        "workers": default_workers(),
     }

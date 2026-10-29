@@ -146,8 +146,9 @@ class Job:
 
 class JobStore:
     def __init__(self, workers: int | None = None):
+        # 默认按内存能力决定并发数：小内存机器只跑一个，避免两个任务叠加 OOM
         if workers is None:
-            workers = int(os.environ.get("LATTICE_WORKERS", "2"))
+            workers = resources.default_workers()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lattice")
