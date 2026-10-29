@@ -86,7 +86,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 | 位置 | 地址 | 说明 |
 | --- | --- | --- |
 | cloud-server-2（腾讯云，广州） | <http://114.132.241.46:2228/> | 公网可达，`restart=unless-stopped`，内存上限 512 MiB |
-| cloud-server-2（子域名入口） | `http://cad.<你的域名>:2229/` | 由 edge-router 按域名前缀分流，见 [docs/edge-router.md](docs/edge-router.md) |
+| cloud-server-2（子域名入口） | `http://cad.<你的域名>:2229/` | 域名前缀分流由 **echo-server-core** 的进程内插件 `esc.edge-router` 提供（见该仓 `docs/EDGE-ROUTER.md`）；本仓不再包含该反代 |
 | 4090 工作站（内网） | <http://192.168.31.35:18080/> | 局域网可达，见下节 |
 
 容器常驻参数（与 `tools/deploy.sh` 一致）：
@@ -99,29 +99,6 @@ docker run -d --name echo-cad-toolbox --restart unless-stopped \
 > ⚠️ 本服务**没有鉴权**，端口对公网开放意味着任何人都能访问与下载 DXF。
 > 仅供内网 / 临时演示；若需长期公网暴露，请在前面加一层 Nginx + Basic Auth 或
 > 只允许固定 IP（云安全组）访问。
-
-### 用子域名访问（多服务同机）
-
-同一台机器上服务多了以后，端口号不好记。仓库自带一个轻量反代 `edge-router`，
-按 Host 的**第一段**分流，base domain 随意：
-
-```
-http://cad.你的域名:2229/    → 127.0.0.1:2228   echo-cad-toolbox
-http://panel.你的域名:2229/  → 127.0.0.1:8080   其他服务，加一条路由即可
-```
-
-```bash
-sudo sh tools/edge-router/install.sh      # 安装/更新反代（nginx 容器，host 网络）
-edge-route add cad 2228 工具箱             # 新增一条路由，热加载生效
-edge-route list                          # 看路由 + 探测后端状态码
-```
-
-DNS 只需加一条解析（`cad` → 这台机器 IP；或用 `*.你的域名` 泛解析一次搞定）。
-
-> ⚠️ **备案**：拦截是按 Host 判定的，与端口无关 —— 未备案的真实域名在 `:80` 和
-> `:2229` 上都会被 302 到 `dnspod.qcloud.com/webblock`，只有 HTTPS 不触发（Host 在
-> TLS 里）。域名已备案直接用 HTTP；未备案就走 HTTPS（放行 443 + 放证书）。
-> 完整实测矩阵与踩坑记录见 **[docs/edge-router.md](docs/edge-router.md)**。
 
 ### 局域网 / 内网访问
 
@@ -295,8 +272,7 @@ echo-cad-toolbox/
 ├── tools/
 │   ├── browser_check.py    # 无头浏览器端到端检查（JS 错误 + 画布像素）
 │   ├── lan_check.py        # 局域网可访问性自检（列出可分享地址）
-│   ├── deploy.sh           # 服务器一键部署（纯 docker，无 compose 也能跑）
-│   └── edge-router/        # 域名前缀 → 端口 的分流反代（nginx + edge-route）
+│   └── deploy.sh           # 服务器一键部署（纯 docker，无 compose 也能跑）
 │   └── shoot.py            # 生成 README 配图
 ├── Dockerfile          # 多阶段构建，非 root 运行，内置 HEALTHCHECK
 └── docker-compose.yml
