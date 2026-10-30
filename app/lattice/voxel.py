@@ -365,6 +365,10 @@ def _void_pocket_radii(
     # 峰值小于 3/4 体素的空腔半宽不到 1 个体素，几乎都是射线奇偶填充/降采样留下的
     # 噪声（真正这么小的孔在占据栅格里已经塌了），丢掉它们免得刷出假告警。
     keep = peaks >= 0.75 * float(sub_pitch)
+    # 空腔边界是按体素中心判定的，空腔整体比真实孔壁"靠里"约半个体素，
+    # 内切半径因此被低估；补回来。上限 35% 是为了不让 1~2 个体素的噪声空腔
+    # 被放大成"小孔"（真实的大空腔补偿量只有几个百分点）。
+    peaks = np.minimum(peaks + 0.5 * float(sub_pitch), peaks * 1.35)
     radii = [float(v) for v in peaks[keep]]
     return radii, len(radii)
 

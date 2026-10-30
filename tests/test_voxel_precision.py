@@ -110,6 +110,16 @@ def test_feature_report_detects_small_hole(hole_volume: dict) -> None:
     assert features["hole_to_pitch_ratio"] is not None
 
 
+@pytest.mark.parametrize("resolution", [80, 120, 160])
+def test_feature_report_accuracy_across_resolutions(resolution: int) -> None:
+    """诊断出的最小孔半径在常用分辨率区间内都应接近真值（±40%）。"""
+    mesh = _plate_with_hole()
+    volume = voxel.mesh_to_volume(mesh, resolution=resolution)
+    radius = (volume.get("features") or {}).get("min_hole_radius")
+    assert radius is not None, f"resolution={resolution} 没量到孔"
+    assert radius == pytest.approx(HOLE_R, rel=0.4), f"resolution={resolution} → {radius}"
+
+
 def test_feature_report_ignores_exterior() -> None:
     """实心块没有内腔 → 不该报"最小孔"。"""
     mesh = trimesh.creation.box(extents=(30.0, 30.0, 10.0))
