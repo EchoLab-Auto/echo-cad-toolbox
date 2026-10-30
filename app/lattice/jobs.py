@@ -189,7 +189,13 @@ class JobStore:
         with self._lock:
             job = self._jobs.pop(job_id, None)
         if job is not None:
+            with job.lock:
+                job.params = None
+                job.stats = None
             shutil.rmtree(job.dir, ignore_errors=True)
+        # 删作业是用户能主动"腾内存"的操作，顺手把堆还回 OS ——
+        # 小内存容器里连跑几个高分辨率作业后不 trim，RSS 会一路顶到上限。
+        release_memory()
 
     def gc(self) -> None:
         """清理超过 TTL 的作业。"""
@@ -198,6 +204,8 @@ class JobStore:
             stale = [jid for jid, job in self._jobs.items() if now - job.updated_at > JOB_TTL_SECONDS]
         for jid in stale:
             self.delete(jid)
+        if stale:
+            release_memory()
 
     # -- 上传 ------------------------------------------------------------- #
     def create_from_bytes(self, data: bytes, filename: str, max_edge: float | None = None) -> Job:
