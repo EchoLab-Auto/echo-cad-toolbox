@@ -87,7 +87,7 @@ _PRIM_MAX_EXT = 3.0
 #: 细分后的图元数量上限（超了就放宽尺寸上限，细分过头只浪费内存）
 _PRIM_BUDGET = 240_000
 #: 每个窄带体素参与精确距离计算的候选图元数（KD-tree 的 k）
-_NEIGHBOR_COUNT = 10
+_NEIGHBOR_COUNT = 8
 #: 每批处理的体素数，控制峰值内存（批内配对数组 ≈ 批 × k）
 _VOXEL_CHUNK = 32_768
 #: 窄带体素数量上限：超过就按比例收窄 band，保证高分辨率下体素化仍然是一次秒级操作
@@ -95,9 +95,9 @@ _BAND_MAX_VOXELS = 800_000
 #: 窄带外侧过渡回 EDT 的宽度（单位：体素）
 _BAND_TRANSITION = 1.0
 #: 候选体素的余量（单位：体素）：class_dist <= (band + 余量) * pitch 全部纳入。
-#: 异类体素中心到表面的距离最多比真实距离大 ~1.3 倍，取 1.5 层余量能覆盖
-#: |d| <= (band + 1) * pitch 的全部体素（含过渡带）。
-_BAND_CANDIDATES = 1.5
+#: 异类体素中心到表面的距离最多比真实距离大 ~1.3 倍，band 以内（权重 1）的体素
+#: 一定落在 (band + 1) 层以内，剩下的过渡带由 EDT 兜底。
+_BAND_CANDIDATES = 1.0
 #: cKDTree 并行查询线程数（-1 = 全部核；距离计算是纯数值、放线程池能线性加速）
 _KD_WORKERS = -1
 
@@ -118,7 +118,8 @@ def _split_triangles(
     图元数量超过 ``budget`` 时把尺寸上限翻倍重来：宁可图元大一点（候选略粗），
     也不要让图元数组把内存吃穿。
     """
-    cur = np.ascontiguousarray(tri, dtype=np.float64)
+    origin_tri = np.ascontiguousarray(tri, dtype=np.float64)
+    cur = origin_tri
     for _ in range(6):
         limit = max_ext * pitch
         # 逐层细分：每轮只处理"还太大"的那部分，已合格的小三角形直接收进 kept。
@@ -130,7 +131,11 @@ def _split_triangles(
             a, b, c = work[:, 0], work[:, 1], work[:, 2]
             lo = np.minimum(np.minimum(a, b), c)
             hi = np.maximum(np.maximum(a, b), c)
-            big = (hi - lo).max(axis=1) > limit
+            area2 = np.linalg.norm(np.cross(b - a, c - a), axis=1)
+            # 只切"又大又有面积"的三角形：布尔运算常留下又长又薄的碎片，它们的
+            # AABB 很长但面积≈0，按 AABB 切会切成几千个零面积小片，白吃内存 ——
+            # 而且碎片本来就不覆盖任何表面，距离由旁边的面片给出。
+            big = ((hi - lo).max(axis=1) > limit) & (area2 > 0.5 * limit * limit)
             if not big.any():
                 kept.append(work)
                 break
@@ -149,10 +154,13 @@ def _split_triangles(
                 ],
                 axis=0,
             )
-        cur = kept[0] if len(kept) == 1 else np.concatenate(kept, axis=0)
-        if len(cur) <= budget:
-            return cur
+        built = kept[0] if len(kept) == 1 else np.concatenate(kept, axis=0)
+        if len(built) <= budget:
+            return built
+        # 超预算：放宽尺寸上限，从**原始三角形**重来（不能接着切已经切过的，
+        # 那样只会原样返回超预算的结果）
         max_ext *= 2.0
+        cur = origin_tri
     return cur
 
 
