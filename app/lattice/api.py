@@ -11,8 +11,11 @@ from __future__ import annotations
 import mimetypes
 from typing import Any
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+import json
+
+import numpy as np
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from ..geometry import CycloidParams
 from . import meshio, pipeline, resources
@@ -174,6 +177,48 @@ def preview(job_id: str, kind: str, v: str | None = None):
         str(path),
         media_type="model/gltf-binary",
         headers={"Cache-Control": "no-store", "X-Lattice-Version": str(job.version)},
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/volume",
+    summary="体素 SDF 体场（float32 原始字节，浏览器 GPU 生成用）",
+    response_class=Response,
+)
+def volume_grid(
+    job_id: str,
+    resolution: int = Query(160, ge=48, le=400, description="最长边方向的体素数"),
+):
+    """把体素化后的有符号距离场以**二进制**返回，供浏览器端 GPU 生成晶格。
+
+    响应体是 C 序 float32（shape = nx,ny,nz，单位 mm），元数据放在
+    ``X-Volume-Meta`` 头里（JSON：shape / pitch / origin / bounds / resolution /
+    features）。体场按（作业, 分辨率）缓存，重复请求不会重算。
+    """
+    try:
+        volume = store.volume_for(job_id, resolution)
+    except JobError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sdf = np.ascontiguousarray(volume["sdf"], dtype="<f4")
+    meta = {
+        "resolution": int(volume.get("resolution", resolution)),
+        "shape": [int(v) for v in sdf.shape],
+        "pitch": float(volume["pitch"]),
+        "origin": [float(v) for v in np.asarray(volume["origin"]).ravel()[:3]],
+        "bounds": [[float(v) for v in row] for row in np.asarray(volume["bounds"])],
+        "bytes": int(sdf.nbytes),
+    }
+    features = volume.get("features")
+    if isinstance(features, dict):
+        meta["features"] = features
+    return Response(
+        content=sdf.tobytes(order="C"),
+        media_type="application/octet-stream",
+        headers={
+            "X-Volume-Meta": json.dumps(meta, separators=(",", ":")),
+            "Cache-Control": "no-store",
+        },
     )
 
 

@@ -4,19 +4,26 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>晶格化工作台 · echo-cad-toolbox</title>
-<meta name="description" content="把 STL / STEP 实体转成晶格结构：gyroid / Schwarz P / Diamond 等 TPMS 与 BCC / FCC / Octet 桁架，实时预览并导出 STL / 3MF / OBJ / PLY。" />
+<meta name="description" content="把 STL / STEP 实体转成晶格结构：gyroid / Schwarz P / Diamond 等 TPMS 与 BCC / FCC / Octet 桁架，浏览器 GPU 实时生成，小孔保真体素化，导出 STL / 3MF / OBJ / PLY。" />
 <link rel="icon" href="/static/favicon.svg" />
+<link rel="stylesheet" href="/static/base.css" />
 <link rel="stylesheet" href="/static/lattice/style.css" />
 <script type="importmap">
-{ "imports": { "three": "/static/lattice/vendor/three/build/three.module.js" } }
+{ "imports": { "three": "/static/vendor/three/build/three.module.js" } }
 </script>
 </head>
-<body>
+<body class="app app-lattice">
 
 <header class="topbar">
   <div class="brand">
+    <a class="app-back" href="/" title="返回工具箱">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M10 3 5 8l5 5"/>
+      </svg>
+      工具箱
+    </a>
     <span class="logo" aria-hidden="true">
-      <svg viewBox="0 0 32 32" width="22" height="22">
+      <svg viewBox="0 0 32 32" width="20" height="20">
         <path d="M4 10.5 16 4l12 6.5v11L16 28 4 21.5z" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".55"/>
         <path d="M4 10.5 16 17l12-6.5M16 17v11" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
         <circle cx="10" cy="13.7" r="1.5" fill="currentColor"/>
@@ -26,15 +33,14 @@
     </span>
     <div class="titles">
       <h1>晶格化工作台</h1>
-      <p>STL / STEP → 晶格结构 · TPMS 与桁架 · 实时预览与导出</p>
+      <p>STL / STEP → 晶格结构 · TPMS 与桁架 · 浏览器 GPU 实时生成</p>
     </div>
   </div>
 
   <div class="topbar-actions">
-    <nav class="toolnav" aria-label="工具切换">
-      <a href="/" title="摆线针轮轮廓生成与仿真器">摆线针轮设计</a>
-      <a href="/lattice" class="active" aria-current="page">晶格化</a>
-    </nav>
+    <span class="engine-chip" id="engineChip" title="计算引擎">
+      <i></i><span id="engineLabel">检测显卡…</span>
+    </span>
 
     <div class="export-group">
       <button class="btn primary" id="btnGenerate" disabled>
@@ -56,63 +62,30 @@
     <section class="group">
       <div class="group-head"><span class="dot"></span>模型来源</div>
 
-      <div class="seg seg-full" id="sourceSeg">
-        <button data-source="cycloid" class="active">摆线轮盘</button>
-        <button data-source="upload">上传文件</button>
+      <div class="dropzone" id="dropzone" tabindex="0" role="button"
+           aria-label="上传模型文件">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/>
+          <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>
+        </svg>
+        <b>拖入模型或点击选择</b>
+        <small>STL · STEP · IGES · OBJ · PLY · 3MF · GLB</small>
+      </div>
+      <input type="file" id="fileInput" hidden
+             accept=".stl,.step,.stp,.iges,.igs,.obj,.ply,.3mf,.glb,.gltf" />
+
+      <div class="chips-row">
+        <span class="chips-label">样例</span>
+        <button class="chip" data-sample="cube">立方体</button>
+        <button class="chip" data-sample="cylinder">圆柱</button>
+        <button class="chip" data-sample="sphere">球</button>
+        <button class="chip" data-sample="tube">空心管</button>
       </div>
 
-      <!-- 摆线轮盘 -->
-      <div id="cycloidSource" class="source-body">
-        <p class="hint" id="cycloidHint">按摆线针轮参数直接生成 3D 轮盘，免去导出建模。</p>
-
-        <div class="field">
-          <div class="label-row"><label for="czc">齿数 Zc</label><output id="czcOut">39</output></div>
-          <input type="range" id="czc" min="6" max="120" step="1" value="39" />
-        </div>
-        <div class="field">
-          <div class="label-row"><label for="ce">偏心距 e</label><output id="ceOut">1.43 mm</output></div>
-          <input type="range" id="ce" min="0.2" max="6" step="0.01" value="1.43" />
-        </div>
-        <div class="field">
-          <div class="label-row"><label for="crz">针齿中心圆 Rz</label><output id="crzOut">88.0 mm</output></div>
-          <input type="range" id="crz" min="10" max="400" step="0.5" value="88" />
-        </div>
-        <div class="field">
-          <div class="label-row"><label for="crp">针齿半径 rp</label><output id="crpOut">5.50 mm</output></div>
-          <input type="range" id="crp" min="0.5" max="30" step="0.1" value="5.5" />
-        </div>
-        <div class="field">
-          <div class="label-row"><label for="cwidth">盘厚</label><output id="cwidthOut">14.0 mm</output></div>
-          <input type="range" id="cwidth" min="2" max="80" step="1" value="14" />
-        </div>
-
-        <div class="kpi" id="cycloidKpi"></div>
-
-        <button class="btn wide" id="btnBuildCycloid">生成轮盘</button>
-        <p class="hint" id="cycloidFromUrl" hidden></p>
-      </div>
-
-      <!-- 上传 -->
-      <div id="uploadSource" class="source-body" hidden>
-        <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="上传模型">
-          <input type="file" id="fileInput" hidden
-                 accept=".stl,.step,.stp,.iges,.igs,.obj,.ply,.3mf,.glb,.gltf" />
-          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
-            <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-            <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-          </svg>
-          <strong>拖入模型，或点击选择</strong>
-          <span>STL · STEP · STP · IGES · OBJ · PLY · 3MF（≤200MB）</span>
-        </div>
-        <div class="samples">
-          <span class="samples-label">样例</span>
-          <button class="chip" data-sample="bracket">L 支架</button>
-          <button class="chip" data-sample="cube">立方体</button>
-          <button class="chip" data-sample="cylinder">圆柱</button>
-          <button class="chip" data-sample="sphere">球</button>
-          <button class="chip" data-sample="tube">空心管</button>
-        </div>
-      </div>
+      <button class="btn wide dashed" id="btnCycloid" title="用摆线针轮参数生成 3D 盘体，再做成减重晶格">
+        从摆线针轮参数生成盘体…
+      </button>
+      <p class="hint" id="cycloidFromUrl" hidden></p>
     </section>
 
     <section class="group">
@@ -149,55 +122,73 @@
         <div class="label-row"><label>相对密度预估</label><output id="densityPct">—</output></div>
         <div class="density-bar"><i id="densityFill"></i></div>
       </div>
-
-      <details class="advanced">
-        <summary>高级选项</summary>
-
-        <div class="field">
-          <div class="label-row"><label for="resSel">体素分辨率</label><output id="resOut">160</output></div>
-          <select id="resSel">
-            <option value="96">96（最快）</option>
-            <option value="128">128</option>
-            <option value="160" selected>160（推荐）</option>
-            <option value="200">200</option>
-            <option value="256">256（慢，精细）</option>
-          </select>
-          <p class="hint" id="resHint" hidden></p>
-        </div>
-
-        <div class="field">
-          <label for="wallSel">曲面填充方式</label>
-          <select id="wallSel">
-            <option value="sheet">薄壁（sheet）</option>
-            <option value="solid">实体骨架（solid）</option>
-          </select>
-        </div>
-
-        <div class="field">
-          <label class="switch"><input type="checkbox" id="skinChk" /><i></i><span>保留原始外表面壳</span></label>
-        </div>
-
-        <div class="field">
-          <div class="label-row"><label for="warpRange">域扭曲</label><output id="warpOut">0.00</output></div>
-          <input type="range" id="warpRange" min="0" max="0.5" step="0.01" value="0" />
-        </div>
-
-        <div class="field">
-          <div class="label-row"><label for="gradRange">Z 向渐变</label><output id="gradOut">0.00</output></div>
-          <input type="range" id="gradRange" min="-0.6" max="0.6" step="0.05" value="0" />
-        </div>
-
-        <div class="field">
-          <div class="label-row"><label for="smoothRange">平滑迭代</label><output id="smoothOut">1</output></div>
-          <input type="range" id="smoothRange" min="0" max="6" step="1" value="1" />
-        </div>
-
-        <div class="field">
-          <div class="label-row"><label for="decRange">抽稀比例</label><output id="decOut">30%</output></div>
-          <input type="range" id="decRange" min="0" max="0.9" step="0.05" value="0.3" />
-        </div>
-      </details>
     </section>
+
+    <section class="group">
+      <div class="group-head"><span class="dot"></span>精度与性能</div>
+
+      <div class="field">
+        <label>计算引擎</label>
+        <div class="seg seg-full" id="engineSeg">
+          <button data-engine="gpu" class="active" disabled>浏览器 GPU</button>
+          <button data-engine="server">服务器</button>
+        </div>
+        <p class="hint" id="engineHint">检测中…</p>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label for="resSel">体素分辨率</label><output id="resOut">160</output></div>
+        <select id="resSel">
+          <option value="96">96（最快）</option>
+          <option value="128">128</option>
+          <option value="160" selected>160（推荐）</option>
+          <option value="200">200</option>
+          <option value="256">256（精细）</option>
+          <option value="320">320（很精细，GPU）</option>
+        </select>
+        <p class="hint" id="resHint" hidden></p>
+      </div>
+
+      <div class="precision" id="precisionBox" hidden></div>
+
+      <button class="btn wide" id="btnAutoRes" hidden title="按模型最小特征自动选分辨率">按最小特征自动选分辨率</button>
+    </section>
+
+    <details class="advanced">
+      <summary>高级选项</summary>
+
+      <div class="field">
+        <label for="wallSel">曲面填充方式</label>
+        <select id="wallSel">
+          <option value="sheet">薄壁（sheet）</option>
+          <option value="solid">实体骨架（solid）</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label class="switch"><input type="checkbox" id="skinChk" /><i></i><span>保留原始外表面壳</span></label>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label for="warpRange">域扭曲</label><output id="warpOut">0.00</output></div>
+        <input type="range" id="warpRange" min="0" max="0.5" step="0.01" value="0" />
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label for="gradRange">Z 向渐变</label><output id="gradOut">0.00</output></div>
+        <input type="range" id="gradRange" min="-0.6" max="0.6" step="0.05" value="0" />
+      </div>
+
+      <div class="field server-only" title="平滑与抽稀会磨掉小特征，只在服务端生成时可用">
+        <div class="label-row"><label for="smoothRange">平滑迭代</label><output id="smoothOut">1</output></div>
+        <input type="range" id="smoothRange" min="0" max="6" step="1" value="1" />
+      </div>
+
+      <div class="field server-only" title="抽稀会合并顶点，毫米级小孔可能被抹掉">
+        <div class="label-row"><label for="decRange">抽稀比例</label><output id="decOut">30%</output></div>
+        <input type="range" id="decRange" min="0" max="0.9" step="0.05" value="0.3" />
+      </div>
+    </details>
 
     <p class="foot-note">晶格以毫米为单位导出，可直接进切片软件或 CAE 前处理。</p>
   </aside>
@@ -253,15 +244,58 @@
       <div class="group-head"><span class="dot"></span>参数怎么选</div>
       <ul class="tips">
         <li><b>单胞尺寸</b>先取零件最小特征尺寸的 1/5 ~ 1/3</li>
-        <li><b>壁厚 / 杆径</b> ≥ 2× 体素尺寸，FDM 打印别低于 0.8 mm</li>
-        <li><b>分辨率</b>先用 128~160 试排版，定稿再上 200~256</li>
-        <li><b>摆线轮盘</b>建议先只填齿根圆以内的区域（壳内填充）</li>
+        <li><b>壁厚 / 杆径</b> ≥ 3× 体素尺寸，否则晶格会断</li>
+        <li><b>毫米级小孔</b>：分辨率要保证孔径 ≥ 4 个体素；用 GPU 引擎时不要开抽稀</li>
+        <li><b>相对密度</b> 20%~40% 是减重与强度的常用折中</li>
       </ul>
     </section>
   </aside>
 </main>
 
-<div class="toast" id="toast" hidden></div>
+<div class="toast" id="toast"></div>
+
+<!-- ------------------------------ 摆线轮盘对话框 ------------------------------ -->
+<dialog class="modal" id="cycloidDialog" aria-label="从摆线针轮参数生成盘体">
+  <form method="dialog" class="modal-head">
+    <div>
+      <h2>从摆线针轮参数生成盘体</h2>
+      <p>用摆线针轮设计器的参数直接得到带柱销孔与中心孔的 3D 轮盘，省掉「导出 DXF → 建模 → 导出 STL」。</p>
+    </div>
+    <button class="ghost-icon" value="cancel" aria-label="关闭">✕</button>
+  </form>
+
+  <div class="modal-body">
+    <div class="field">
+      <div class="label-row"><label for="czc">齿数 Zc</label><output id="czcOut">39</output></div>
+      <input type="range" id="czc" min="6" max="120" step="1" value="39" />
+    </div>
+    <div class="field">
+      <div class="label-row"><label for="ce">偏心距 e</label><output id="ceOut">1.43 mm</output></div>
+      <input type="range" id="ce" min="0.2" max="6" step="0.01" value="1.43" />
+    </div>
+    <div class="field">
+      <div class="label-row"><label for="crz">针齿中心圆半径 Rz</label><output id="crzOut">88.0 mm</output></div>
+      <input type="range" id="crz" min="10" max="400" step="0.5" value="88" />
+    </div>
+    <div class="field">
+      <div class="label-row"><label for="crp">针齿半径 rp</label><output id="crpOut">5.50 mm</output></div>
+      <input type="range" id="crp" min="0.5" max="30" step="0.1" value="5.5" />
+    </div>
+    <div class="field">
+      <div class="label-row"><label for="cwidth">盘厚</label><output id="cwidthOut">14.0 mm</output></div>
+      <input type="range" id="cwidth" min="2" max="80" step="1" value="14" />
+    </div>
+
+    <div class="kpi" id="cycloidKpi"></div>
+    <p class="hint" id="cycloidHint">按摆线针轮参数直接生成 3D 轮盘，免去导出建模。</p>
+  </div>
+
+  <form method="dialog" class="modal-foot">
+    <button class="btn" value="cancel">取消</button>
+    <button class="btn primary" id="btnBuildCycloid" value="ok">生成轮盘</button>
+  </form>
+</dialog>
+
 <script type="module" src="/static/lattice/app.js"></script>
 </body>
 </html>

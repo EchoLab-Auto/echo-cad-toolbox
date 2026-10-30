@@ -321,6 +321,26 @@ class JobStore:
         finally:
             release_memory()
 
+    def volume_for(self, job_id: str, resolution: int) -> dict:
+        """取（必要时现算）指定分辨率下的体素 SDF 体场。
+
+        浏览器端 GPU 生成晶格时需要原始体场：服务端只做一次性体素化（结果按
+        分辨率缓存到 ``volume.npz``），后续每一次参数调整都由浏览器本地算，
+        服务端不再参与 —— 这也是让高分辨率、小孔特征成为可能的前提。
+        """
+        job = self.get(job_id)
+        res = int(max(48, min(resources.MAX_RESOLUTION_HARD_LIMIT, int(resolution))))
+        try:
+            volume = self._ensure_volume(job, res)
+        except Exception as exc:  # noqa: BLE001
+            job.set_state(status="ready", stage="体素化失败", error=str(exc))
+            raise JobError(f"体素化失败：{exc}") from exc
+        finally:
+            release_memory()
+        if job.status == "preparing":
+            job.set_state(status="ready", stage="体素就绪", progress=1.0)
+        return volume
+
     def _ensure_volume(self, job: Job, resolution: int) -> dict:
         if job.volume_path.exists() and job.resolution == resolution:
             try:

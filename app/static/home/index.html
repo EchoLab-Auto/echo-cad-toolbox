@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CAD 工具箱 · echo-cad-toolbox</title>
+<meta name="description" content="两个独立的毫米级工具：摆线针轮齿廓设计器（仿真 / DXF 导出）与晶格化工作台（STL/STEP → TPMS 与桁架晶格，浏览器 GPU 生成）。" />
+<link rel="icon" href="/static/favicon.svg" />
+<link rel="stylesheet" href="/static/base.css" />
+<link rel="stylesheet" href="/static/home/home.css" />
+</head>
+<body class="home">
+
+<div class="home-grid" aria-hidden="true"></div>
+
+<header class="home-top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="24" height="24">
+        <circle cx="16" cy="16" r="12.5" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".45"/>
+        <circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="2.6 2.2" opacity=".9"/>
+        <circle cx="16" cy="16" r="2.6" fill="currentColor">
+          <animate attributeName="r" values="2.2;3;2.2" dur="2.6s" repeatCount="indefinite"/>
+        </circle>
+      </svg>
+    </span>
+    <div>
+      <h1>CAD 工具箱</h1>
+      <p>echo-cad-toolbox</p>
+    </div>
+  </div>
+  <div class="home-top-actions">
+    <span class="status-pill" id="statusPill"><i></i><span id="statusText">连接中…</span></span>
+    <a class="link-btn" href="/docs" target="_blank" rel="noopener">API 文档</a>
+  </div>
+</header>
+
+<main class="home-main">
+
+  <section class="hero">
+    <p class="eyebrow">毫米级 · 两个独立的工具</p>
+    <h2>从齿廓设计到轻量化结构</h2>
+    <p class="lede">
+      两个工具各自独立成页、互不干扰：摆线针轮设计器负责齿形与运动学，
+      晶格化工作台负责把实体做成可打印的晶格结构。参数可以一键互相传递，但界面与计算各管各的。
+    </p>
+  </section>
+
+  <section class="cards">
+
+    <!-- ---------------------------------------------------------------- -->
+    <a class="tool-card" href="/cycloid" data-tool="cycloid">
+      <div class="card-head">
+        <span class="badge-tool">工具 01</span>
+        <span class="card-key">1</span>
+      </div>
+      <div class="card-art" id="artCycloid" aria-hidden="true"></div>
+      <h3>摆线针轮设计器</h3>
+      <p class="card-sub">Cycloidal pin-wheel designer</p>
+      <ul class="card-points">
+        <li>解析短幅外摆线齿廓，三种修形</li>
+        <li>实时运动学仿真与啮合接触分析</li>
+        <li>毫米级 1:1 DXF / SVG 图纸导出</li>
+      </ul>
+      <span class="card-cta">打开设计器 <b>→</b></span>
+    </a>
+
+    <!-- ---------------------------------------------------------------- -->
+    <a class="tool-card" href="/lattice" data-tool="lattice">
+      <div class="card-head">
+        <span class="badge-tool">工具 02</span>
+        <span class="card-key">2</span>
+      </div>
+      <div class="card-art" id="artLattice" aria-hidden="true"></div>
+      <h3>晶格化工作台</h3>
+      <p class="card-sub">Lattice infill workbench</p>
+      <ul class="card-points">
+        <li>9 种晶格：TPMS 曲面与桁架杆系</li>
+        <li>浏览器 GPU 实时生成，毫秒级预览</li>
+        <li>小孔保真体素化，导出 STL / 3MF / OBJ / PLY</li>
+      </ul>
+      <span class="card-cta">打开工作台 <b>→</b></span>
+    </a>
+
+  </section>
+
+  <section class="facts" aria-label="概况">
+    <div class="fact"><span class="fact-k">单位</span><span class="fact-v">毫米（mm）1:1</span></div>
+    <div class="fact"><span class="fact-k">计算</span><span class="fact-v">齿廓在浏览器 · 晶格在 GPU</span></div>
+    <div class="fact"><span class="fact-k">导出</span><span class="fact-v">DXF · SVG · STL · 3MF · OBJ · PLY</span></div>
+  </section>
+
+</main>
+
+<footer class="home-foot">
+  <span>echo-cad-toolbox <b id="versionText">—</b></span>
+  <span class="dot-sep">·</span>
+  <span>纯本地计算，图纸不上传第三方</span>
+</footer>
+
+<script src="/static/home/home.js" type="module"></script>
+</body>
+</html>

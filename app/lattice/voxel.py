@@ -6,8 +6,10 @@
 与网格表面的全部交点，按高度排序后奇偶填充。相比"体素包含性测试"，它一次性
 批量完成、不依赖拾取引擎的包围体实现，对 CAD 离散出来的三角汤也稳健。
 
-随后用欧氏距离变换（EDT）把占据栅格转成 SDF，并带 ``0.5 * pitch`` 的体素中心
-修正，使零等值面落在真实表面附近，marching cubes 出来不会被体素"阶梯化"。
+距离场分两段：远场用**欧氏距离变换（EDT）**，表面附近 ``band`` 个体素内改用
+**精确的点—三角形距离**。EDT 的距离按体素中心量化，误差上限 0.5 个体素；毫米级
+小孔正是死在这半个体素上 —— Ø2 mm 的孔在 pitch≈1 mm 时半径只有 1 个体素，量化
+误差足够把孔壁磨圆、把孔直接糊死。窄带精确化之后零等值面回到亚体素精度。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import gc
 import numpy as np
 import trimesh
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 
 class VolumeError(RuntimeError):
@@ -76,7 +79,397 @@ def _ray_occupancy(
     return inside.reshape(nx, ny, nz)
 
 
-def mesh_to_volume(mesh: trimesh.Trimesh, resolution: int = 160, pad: int = 3) -> dict:
+# --------------------------------------------------------------------------- #
+# 窄带精确距离：图元细分 + 图元重心 KD-tree 候选 + 精确点—三角形距离
+# --------------------------------------------------------------------------- #
+#: 细分后单个图元 AABB 的最大边长（单位：体素）
+_PRIM_MAX_EXT = 3.0
+#: 细分后的图元数量上限（超了就放宽尺寸上限，细分过头只浪费内存）
+_PRIM_BUDGET = 240_000
+#: 每个窄带体素参与精确距离计算的候选图元数（KD-tree 的 k）
+_NEIGHBOR_COUNT = 10
+#: 每批处理的体素数，控制峰值内存（批内配对数组 ≈ 批 × k）
+_VOXEL_CHUNK = 32_768
+#: 窄带体素数量上限：超过就按比例收窄 band，保证高分辨率下体素化仍然是一次秒级操作
+_BAND_MAX_VOXELS = 800_000
+#: 窄带外侧过渡回 EDT 的宽度（单位：体素）
+_BAND_TRANSITION = 1.0
+#: cKDTree 并行查询线程数（-1 = 全部核；距离计算是纯数值、放线程池能线性加速）
+_KD_WORKERS = -1
+
+
+def _split_triangles(
+    tri: np.ndarray,
+    pitch: float,
+    max_ext: float = _PRIM_MAX_EXT,
+    budget: int = _PRIM_BUDGET,
+) -> np.ndarray:
+    """把三角形四叉细分到 AABB 单轴不超过 ``max_ext`` 个体素。
+
+    细分不改变几何（四个子三角形之并与原三角形完全相同），只是让每个图元只覆盖
+    一小块表面。这对候选查询很关键：候选图元是按**图元重心**在 KD-tree 里查的，
+    图元越大重心离表面越远，"k 个最近重心"就越容易漏掉真正最近的面片 —— 一张
+    几十毫米的大平面如果只用一个图元表示，它的重心可能离体素好几个毫米。
+
+    图元数量超过 ``budget`` 时把尺寸上限翻倍重来：宁可图元大一点（候选略粗），
+    也不要让图元数组把内存吃穿。
+    """
+    cur = np.ascontiguousarray(tri, dtype=np.float64)
+    for _ in range(6):
+        limit = max_ext * pitch
+        while True:
+            extent = cur.max(axis=1) - cur.min(axis=1)
+            big = extent.max(axis=1) > limit
+            if not big.any():
+                break
+            small = cur[~big]
+            rest = cur[big]
+            a, b, c = rest[:, 0], rest[:, 1], rest[:, 2]
+            ab = 0.5 * (a + b)
+            bc = 0.5 * (b + c)
+            ca = 0.5 * (c + a)
+            cur = np.concatenate(
+                [
+                    small,
+                    np.stack([a, ab, ca], axis=1),
+                    np.stack([ab, b, bc], axis=1),
+                    np.stack([ca, bc, c], axis=1),
+                    np.stack([ab, bc, ca], axis=1),
+                ],
+                axis=0,
+            )
+        if len(cur) <= budget:
+            return cur
+        max_ext *= 2.0
+    return cur
+
+
+def _point_triangle_dist(p, a, b, c):
+    """批量计算点到三角形的最短距离（mm），入参形状都是 ``(P, 3)``。
+
+    两段式：先用重心坐标判断垂足是否落在三角形内部 —— 落在内部时平面距离就是
+    精确值，直接返回；只有垂足落在三角形外的配对才继续算三条边的点到线段距离。
+    表面附近的体素约 2/3 落在面内，这样能省掉大半逐元素运算。
+    """
+    ab = b - a
+    ac = c - a
+    ap = p - a
+    n = np.cross(ab, ac)
+    nn = np.einsum("ij,ij->i", n, n)
+    s = np.einsum("ij,ij->i", n, ap)
+    plane2 = s * s / np.maximum(nn, 1e-30)
+
+    d00 = np.einsum("ij,ij->i", ab, ab)
+    d01 = np.einsum("ij,ij->i", ab, ac)
+    d11 = np.einsum("ij,ij->i", ac, ac)
+    u = np.einsum("ij,ij->i", ap, ab)
+    v = np.einsum("ij,ij->i", ap, ac)
+    den = d00 * d11 - d01 * d01
+    ok = np.abs(den) > 1e-30
+    safe = np.where(ok, den, 1.0)
+    bu = (d11 * u - d01 * v) / safe
+    bv = (d00 * v - d01 * u) / safe
+    inside = ok & (bu >= 0.0) & (bv >= 0.0) & (bu + bv <= 1.0)
+
+    out2 = np.where(inside, plane2, np.inf)
+    need = np.flatnonzero(~inside)
+    if need.size:
+        pp = p[need]
+        tri = np.stack([a[need], b[need], c[need]], axis=1)
+        best2 = np.full(need.size, np.inf)
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            start = tri[:, i]
+            edge = tri[:, j] - start
+            ee = np.einsum("ij,ij->i", edge, edge)
+            t = np.einsum("ij,ij->i", pp - start, edge) / np.maximum(ee, 1e-30)
+            np.clip(t, 0.0, 1.0, out=t)
+            diff = pp - (start + t[:, None] * edge)
+            np.minimum(best2, np.einsum("ij,ij->i", diff, diff), out=best2)
+        out2[need] = best2
+    return np.sqrt(np.maximum(out2, 0.0))
+
+
+def _exact_narrow_band(
+    mesh: trimesh.Trimesh,
+    shape: tuple[int, int, int],
+    origin: np.ndarray,
+    pitch: float,
+    candidates: np.ndarray,
+    band: float = 3.0,
+    neighbors: int = _NEIGHBOR_COUNT,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """窄带内计算**精确的**点到网格距离，返回 ``(距离, 已精确掩码, 认证比例)``。
+
+    加速结构
+    --------
+    1. **图元细分**：三角形四叉细分到 AABB ≤ ``_PRIM_MAX_EXT`` 个体素，图元数量
+       ≈ O(表面积 / pitch²)，与原始面数无关（几十毫米的大平面被拆成局部小块，
+       候选查询才不会"重心在天边、面片在眼前"）。
+    2. **KD-tree**：以图元重心建 ``cKDTree``，单点查询 O(log P + k)（P = 图元数，
+       k = ``neighbors``），整批点在 C 里并行查完，不进 Python 循环。
+    3. **精确距离**只算 (体素, k 个候选) 这一小撮配对：配对总数 = 窄带体素数 × k，
+       与三角形总数无关。暴力法是 体素数 × 三角形数（Ø40 mm 板 + 96 段圆柱在
+       pitch=0.42 mm 时是 10⁵ × 10³ 量级），这里能降两个数量级。
+
+    正确性
+    ------
+    k 近邻只是**候选**：真正的最近面片有可能不在其中，因为图元重心离它自己的
+    面片最远 ``rho``。所以额外给出认证判据 —— 记第 k 近的图元重心距离为 ``r_k``、
+    候选里的最小精确距离为 ``d_min``，若 ``r_k >= d_min + rho``，则任何不在候选集
+    里的图元到该点的距离都大于 ``d_min``，``d_min`` 就是精确距离。窄带内（离表面
+    一两个体素）这条几乎总成立；认证比例作为 ``exact_ratio`` 返回，供前端提示。
+
+    Parameters
+    ----------
+    candidates:
+        ``shape`` 形状的 bool 掩码，标记需要精确距离的体素（通常是离表面
+        ``band + 1`` 层以内的体素）。
+
+    Returns
+    -------
+    (dist, touched, ratio)
+        ``dist``：``shape`` 形状的距离（mm），未计算处为 ``inf``；
+        ``touched``：哪些体素拿到了精确值；
+        ``ratio``：拿到精确值的体素里通过认证的比例（0~1）。
+    """
+    shape = tuple(int(v) for v in shape)
+    flat_dist = np.full(int(np.prod(shape)), np.inf)
+    flat_touched = np.zeros(int(np.prod(shape)), dtype=bool)
+    empty = (flat_dist.reshape(shape), flat_touched.reshape(shape), 0.0)
+
+    tris = np.asarray(getattr(mesh, "triangles", ()), dtype=np.float64)
+    if tris.ndim != 3 or tris.shape[0] == 0:
+        return empty
+    # 退化三角形（零面积）会让平面距离出现 0/0，先剔掉
+    normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    tris = tris[np.einsum("ij,ij->i", normals, normals) > 1e-24]
+    if len(tris) == 0:
+        return empty
+
+    prim = _split_triangles(tris, float(pitch))
+    centers = prim.mean(axis=1)
+    rho = float(np.max(np.linalg.norm(prim - centers[:, None, :], axis=2)))
+    tree = cKDTree(centers, compact_nodes=True, balanced_tree=True)
+
+    flat = np.flatnonzero(np.asarray(candidates, dtype=bool).reshape(-1))
+    if flat.size == 0:
+        return empty
+    vi, vj, vk = np.unravel_index(flat, shape)
+    limit = float(band) * float(pitch)
+    k = int(max(1, min(int(neighbors), len(centers))))
+    covered = 0
+
+    for start in range(0, flat.size, _VOXEL_CHUNK):
+        stop = min(flat.size, start + _VOXEL_CHUNK)
+        sl = slice(start, stop)
+        pts = np.column_stack(
+            (
+                origin[0] + (vi[sl] + 0.5) * float(pitch),
+                origin[1] + (vj[sl] + 0.5) * float(pitch),
+                origin[2] + (vk[sl] + 0.5) * float(pitch),
+            )
+        )
+        gap, idx = tree.query(pts, k=k, workers=_KD_WORKERS)
+        gap = gap.reshape(len(pts), k)
+        idx = idx.reshape(len(pts), k)
+        miss = idx >= len(centers)  # 邻居不足 k 个时 scipy 用 len(centers) 占位
+        np.minimum(idx, len(centers) - 1, out=idx)
+        corners = prim[idx.reshape(-1)]
+        d = _point_triangle_dist(
+            np.repeat(pts, k, axis=0), corners[:, 0], corners[:, 1], corners[:, 2]
+        ).reshape(len(pts), k)
+        d[miss] = np.inf
+        best = d.min(axis=1)
+        ok = np.flatnonzero(best <= limit)
+        if ok.size == 0:
+            continue
+        target = flat[sl][ok]
+        flat_dist[target] = best[ok]
+        flat_touched[target] = True
+        covered += int(np.count_nonzero(gap[ok, -1] >= best[ok] + rho))
+
+    hit = int(flat_touched.sum())
+    ratio = float(covered) / float(hit) if hit else 0.0
+    return flat_dist.reshape(shape), flat_touched.reshape(shape), ratio
+
+
+# --------------------------------------------------------------------------- #
+# 小特征诊断（内腔 / 通孔半径 → 推荐分辨率）
+# --------------------------------------------------------------------------- #
+def _void_pocket_radii(
+    field: np.ndarray,
+    solid: np.ndarray,
+    bounds=None,
+    origin=None,
+    sub_pitch: float = 1.0,
+    min_voxels: int = 8,
+) -> tuple[list[float], int]:
+    """返回 (实体包围盒内各空腔的内切半径, 空腔个数)。
+
+    空腔 = 实体包围盒内的 void 连通域。之所以把分析范围收进**实体包围盒**而不是
+    整个体场：通孔（Ø2 mm 挖孔最常见的形态）两端都通到体场边界，在整场里属于
+    "外部"而会被漏掉；缩进包围盒后孔道被盒壁切断，就变成独立空腔，其 SDF 最大值
+    正是孔径。封闭内腔本来就在包围盒内，一并覆盖。
+
+    副作用（已记录在 docstring 里）：非凸模型在包围盒内的"空余角落"也会被当成
+    空腔；它们的半径通常很大，不会触发"孔太小"的告警。
+    """
+    if bounds is not None and origin is not None:
+        lo_w = np.asarray(bounds[0], dtype=np.float64).ravel()[:3]
+        hi_w = np.asarray(bounds[1], dtype=np.float64).ravel()[:3]
+        org = np.asarray(origin, dtype=np.float64).ravel()[:3]
+        lo = np.clip(np.ceil((lo_w - org) / sub_pitch - 0.5), 0, np.array(solid.shape) - 1)
+        hi = np.clip(np.floor((hi_w - org) / sub_pitch - 0.5), 0, np.array(solid.shape) - 1)
+        lo = [int(v) for v in lo]
+        hi = [int(v) for v in hi]
+    else:
+        idx = np.nonzero(solid)
+        if idx[0].size == 0:
+            return [], 0
+        lo = [int(a.min()) for a in idx]
+        hi = [int(a.max()) for a in idx]
+    box = np.zeros_like(solid)
+    box[lo[0] : hi[0] + 1, lo[1] : hi[1] + 1, lo[2] : hi[2] + 1] = True
+    void = box & ~solid
+    labels, count = ndimage.label(void)
+    if count == 0:
+        return [], 0
+    sizes = np.bincount(labels.ravel(), minlength=count + 1)
+    ids = [i for i in range(1, count + 1) if int(sizes[i]) >= min_voxels]
+    if not ids:
+        return [], 0
+    peaks = np.atleast_1d(ndimage.maximum(field, labels, ids)).astype(np.float64)
+    radii = [float(v) for v in peaks if float(v) > 0.0]
+    return radii, len(radii)
+
+
+def feature_report(
+    sdf: np.ndarray,
+    pitch: float,
+    extent_mm: float | None = None,
+    *,
+    bounds=None,
+    origin=None,
+    max_side: int = 128,
+    min_voxels: int = 8,
+    res_range: tuple[int, int] = (48, 400),
+) -> dict:
+    """估计模型里最窄的孔/内腔半径，并给出推荐分辨率（纯 float/int/str/list）。
+
+    分析在**辅助低分辨率栅格**（最长边 ≤ ``max_side``）上做，320³ 的高分辨率体场
+    也不会因为连通域标记多占内存；诊断精度由该栅格的体素尺寸决定，见返回的
+    ``scan_pitch_mm``。
+
+    量的是"实体包围盒内的空腔"的内切半径：空腔里 SDF 的最大值就是它的内切球
+    半径，也就是孔/腔的半径。取包围盒而不是整个体场，是为了让**通孔**也能量到
+    —— 通孔两端通到体场边界，在整场里属于"外部"，缩进包围盒后才会被盒壁封成
+    独立空腔。封闭内腔本来就在包围盒内，一并覆盖。
+
+    推荐分辨率的取法：目标体素边长 ≈ 最小孔半径 / 2（孔直径占 4 个体素），
+    再按 ``res_range`` 夹到合理区间。
+
+    Parameters
+    ----------
+    sdf:
+        有符号距离场（``<=0`` 为材料），形状 ``(nx, ny, nz)``，单位 mm。
+    pitch:
+        体素边长（mm）。
+    extent_mm:
+        模型最长边（mm）。``None`` 时按体场自身尺寸估算（会含 ``pad`` 的余量）。
+    bounds, origin:
+        模型包围盒与体场原点（mm）。给了就用真实包围盒切空腔，比"实体体素的
+        包围盒"更贴边；不给则按实体体素自己算。
+    max_side:
+        诊断栅格的最长边体素数。
+    min_voxels:
+        空腔的最小体积（辅助栅格体素数），用来滤掉体素化噪点。
+    res_range:
+        推荐分辨率的上下限。
+
+    Returns
+    -------
+    dict: ``pitch_mm`` / ``min_hole_radius`` / ``min_feature_mm`` /
+    ``recommended_resolution`` / ``hole_to_pitch_ratio`` / ``warnings``，
+    外加 ``cavities`` / ``scan_pitch_mm`` / ``scan_shape`` 三个诊断字段。
+    全部是 float / int / str / list，可直接 JSON 序列化（会被塞进 HTTP 头）。
+    """
+    field = np.asarray(sdf, dtype=np.float32)
+    if field.ndim != 3:
+        raise ValueError("sdf 必须是三维体场")
+    pitch = float(pitch)
+    shape = tuple(int(v) for v in field.shape)
+    step = max(1, int(np.ceil(max(shape) / max(8, int(max_side)))))
+    if step > 1:
+        # 分块取 max：宁可把孔判大一点，也不要因为降采样把毫米级小孔整个漏掉
+        blocks = [int(np.ceil(n / step)) for n in shape]
+        pad = [(blocks[i] * step - shape[i], 0) for i in range(3)]
+        if any(p[0] for p in pad):
+            field = np.pad(field, pad, mode="edge")
+        field = field.reshape(blocks[0], step, blocks[1], step, blocks[2], step).max(
+            axis=(1, 3, 5)
+        )
+        sub_pitch = pitch * step
+    else:
+        sub_pitch = pitch
+    sub = np.ascontiguousarray(field, dtype=np.float32)
+    scan_shape = tuple(int(v) for v in sub.shape)
+
+    # 体素化/降采样可能在空腔里留下孤立材料碎点，会把一条孔道切成几段（每段的
+    # 最大 SDF 都偏小，量出来就不是孔径了），一次 1 体素闭运算即可吃掉
+    solid = ndimage.binary_closing(sub <= 0.0, iterations=1)
+    radii, cavities = _void_pocket_radii(
+        sub, solid, bounds=bounds, origin=origin, sub_pitch=sub_pitch,
+        min_voxels=int(min_voxels),
+    )
+
+    if extent_mm and float(extent_mm) > 0:
+        extent = float(extent_mm)
+    else:
+        extent = float(max(scan_shape) * sub_pitch)
+    lo, hi = int(res_range[0]), int(res_range[1])
+
+    result: dict = {
+        "pitch_mm": round(pitch, 4),
+        "scan_pitch_mm": round(float(sub_pitch), 4),
+        "scan_shape": [int(v) for v in scan_shape],
+        "cavities": int(cavities),
+        "min_hole_radius": None,
+        "min_feature_mm": round(2.0 * pitch, 4),
+        "recommended_resolution": int(np.clip(np.ceil(extent / pitch), lo, hi)),
+        "hole_to_pitch_ratio": None,
+        "warnings": [],
+    }
+    if not radii:
+        # 没有可测的孔/腔：最小特征未知，按"当前体素能分辨的下限"记 2 个体素
+        return result
+
+    smallest = float(min(radii))
+    result["min_hole_radius"] = round(smallest, 4)
+    result["min_feature_mm"] = round(2.0 * smallest, 4)
+    # 目标体素边长 ≈ 最小孔半径 / 2 → 分辨率 = 最长边 / 目标边长
+    need_pitch = max(0.5 * smallest, 1e-6)
+    recommended = int(np.clip(np.ceil(extent / need_pitch), lo, hi))
+    result["recommended_resolution"] = recommended
+    ratio = float(smallest / pitch) if pitch > 0 else float("inf")
+    result["hole_to_pitch_ratio"] = round(ratio, 3)
+    if ratio < 1.0:
+        result["warnings"].append(
+            f"最小孔半径 {smallest:.2f} mm 不到 1 个体素（{ratio:.1f}），"
+            f"等值面会把孔糊死或严重失真，建议分辨率 ≥ {recommended}"
+        )
+    elif ratio < 2.0:
+        result["warnings"].append(
+            f"最小孔半径 {smallest:.2f} mm 只有 {ratio:.1f} 个体素，"
+            f"等值面会明显失真，建议分辨率 ≥ {recommended}"
+        )
+    return result
+
+def mesh_to_volume(
+    mesh: trimesh.Trimesh,
+    resolution: int = 160,
+    pad: int = 3,
+    exact_band: float = 3.0,
+) -> dict:
     """把三角网格体素化成 SDF 体场。
 
     Parameters
@@ -87,6 +480,10 @@ def mesh_to_volume(mesh: trimesh.Trimesh, resolution: int = 160, pad: int = 3) -
         最长边方向的体素数量（决定精度与耗时，128~256 是常用范围）。
     pad:
         各方向额外补的体素层数，保证等值面闭合。
+    exact_band:
+        表面附近多少个体素内改用**精确的**点—三角形距离（单位：体素）。
+        0 表示关闭（退回纯 EDT）。这是毫米级小孔能保真的关键：EDT 的量化误差
+        上限 0.5 个体素，pitch=1 mm 时就是 ±0.5 mm，Ø2 mm 的孔会被磨圆甚至糊死。
 
     Returns
     -------
@@ -124,11 +521,45 @@ def mesh_to_volume(mesh: trimesh.Trimesh, resolution: int = 160, pad: int = 3) -
     half = 0.5 * pitch
     sdf = np.where(occ, -(inside_dist - half), outside_dist - half)
 
+    # 窄带精确化：EDT 的距离按体素中心量化（±0.5 体素），毫米级小孔正是死在
+    # 这半个体素上。表面附近 band 个体素内换成精确的点—三角形距离，窄带外侧再留
+    # 一个体素宽的 smoothstep 过渡带融回 EDT，接缝处不会有台阶。
+    exact_ratio = 0.0
+    if exact_band and exact_band > 0:
+        band = float(exact_band)
+        # 候选体素：异类体素中心到表面的距离最远 0.87 个体素，所以
+        # class_dist <= (band + 1) * pitch 一定覆盖全部 |d| <= band * pitch 的体素。
+        # 体素太多时按比例收窄 band（成本 ≈ 窄带体素数 × 候选数），保证高分辨率下
+        # 体素化仍然是一次秒级操作。
+        class_dist = np.where(occ, inside_dist, outside_dist)
+        candidates = class_dist <= (band + 1.0) * pitch
+        while int(candidates.sum()) > _BAND_MAX_VOXELS and band > 1.4:
+            band = max(1.4, band * 0.8)
+            candidates = class_dist <= (band + 1.0) * pitch
+        exact, touched, exact_ratio = _exact_narrow_band(
+            mesh, shape, origin, float(pitch), candidates, band=band
+        )
+        if touched.any():
+            # w：窄带内侧为 1，到 band 边缘降为 0；smoothstep 保证 C1 连续（无折角）
+            w = np.clip((band * pitch - exact) / (_BAND_TRANSITION * pitch), 0.0, 1.0)
+            w = np.where(touched, w * w * (3.0 - 2.0 * w), 0.0)
+            near = np.where(touched, exact, 0.0)
+            sdf = np.sign(sdf) * (w * near + (1.0 - w) * np.abs(sdf))
+
     # 边界保护（实体自身不该贴到体场边界，这里兜底）
     sdf = boundary_guard(sdf, pitch)
 
+    # 小特征诊断：模型里最窄的通道（内腔 / 通孔）决定"这个分辨率够不够"。
+    # 用带符号距离场本身来量半径 —— 空腔里 SDF 的最大值就是内切半径。
+    try:
+        features = feature_report(
+            sdf, float(pitch), float(extents.max()), bounds=bounds, origin=origin
+        )
+    except Exception:  # noqa: BLE001 - 诊断失败不影响主流程
+        features = None
+
     sdf = np.ascontiguousarray(sdf.astype(np.float32))
-    return {
+    volume = {
         "sdf": sdf,
         "pitch": float(pitch),
         "origin": origin.astype(np.float64),
@@ -136,7 +567,12 @@ def mesh_to_volume(mesh: trimesh.Trimesh, resolution: int = 160, pad: int = 3) -
         "resolution": int(max(shape)),
         "shape": tuple(int(v) for v in shape),
         "fill_ratio": float(occ.mean()),
+        # 窄带里拿到精确距离、且通过 KD-tree 认证的体素比例（诊断用）
+        "exact_ratio": float(exact_ratio),
     }
+    if features:
+        volume["features"] = features
+    return volume
 
 
 def boundary_guard(field: np.ndarray, pitch: float, voxels: float = 1.6) -> np.ndarray:
@@ -160,6 +596,8 @@ def boundary_guard(field: np.ndarray, pitch: float, voxels: float = 1.6) -> np.n
 
 
 def save_volume(volume: dict, path) -> None:
+    import json
+
     np.savez_compressed(
         str(path),
         sdf=volume["sdf"],
@@ -167,13 +605,18 @@ def save_volume(volume: dict, path) -> None:
         origin=volume["origin"],
         bounds=volume["bounds"],
         resolution=volume["resolution"],
+        # 小特征诊断随体场一起缓存：否则第一次请求（现算）和第二次（读缓存）
+        # 返回的 X-Volume-Meta 头会不一致
+        features=json.dumps(volume.get("features") or {}, ensure_ascii=False),
     )
 
 
 def load_volume(path) -> dict:
+    import json
+
     with np.load(str(path)) as data:
         sdf = data["sdf"]
-        return {
+        volume = {
             "sdf": sdf,
             "pitch": float(data["pitch"]),
             "origin": np.asarray(data["origin"], dtype=np.float64),
@@ -181,6 +624,14 @@ def load_volume(path) -> dict:
             "resolution": int(data["resolution"]),
             "shape": tuple(int(v) for v in sdf.shape),
         }
+        if "features" in data:
+            try:
+                features = json.loads(str(data["features"]))
+                if features:
+                    volume["features"] = features
+            except ValueError:
+                pass
+        return volume
 
 
 # --------------------------------------------------------------------------- #

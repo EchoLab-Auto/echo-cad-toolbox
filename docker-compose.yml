@@ -11,7 +11,7 @@ services:
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
         # Debian 软件源镜像（国内建议 mirrors.cloud.tencent.com）
         APT_MIRROR: ${APT_MIRROR:-}
-    image: echo-cad-toolbox:1.1.0
+    image: echo-cad-toolbox:1.2.0
     container_name: echo-cad-toolbox
     restart: unless-stopped
     ports:

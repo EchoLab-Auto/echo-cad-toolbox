@@ -3,43 +3,65 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>摆线针轮轮廓生成与仿真器 · echo-cad-toolbox</title>
-<meta name="description" content="交互式摆线针轮（RV 减速器）齿廓生成器：解析短幅外摆线、运动学仿真、接触分析、DXF 导出；并可一键把轮盘做成晶格减重结构。" />
+<title>摆线针轮设计器 · echo-cad-toolbox</title>
+<meta name="description" content="摆线针轮（RV 减速器）齿廓设计器：解析短幅外摆线、三种修形、运动学仿真、啮合接触分析，毫米级 1:1 DXF 图纸导出。派生量全部在浏览器本地计算。" />
 <link rel="icon" href="/static/favicon.svg" />
-<link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/base.css" />
+<link rel="stylesheet" href="/static/cycloid/style.css" />
 </head>
-<body>
+<body class="app app-cycloid">
+
 <header class="topbar">
   <div class="brand">
+    <a class="app-back" href="/" title="返回工具箱">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M10 3 5 8l5 5"/>
+      </svg>
+      工具箱
+    </a>
     <span class="logo" aria-hidden="true">
-      <svg viewBox="0 0 32 32" width="22" height="22">
+      <svg viewBox="0 0 32 32" width="20" height="20">
         <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".55"/>
         <circle cx="16" cy="16" r="8.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-dasharray="3.2 2.4"/>
         <circle cx="16" cy="16" r="3" fill="currentColor"/>
       </svg>
     </span>
     <div class="titles">
-      <h1>摆线针轮轮廓生成与仿真器</h1>
-      <p>Cycloidal pin-wheel profile generator · 解析齿廓 / 运动学仿真 / DXF 导出</p>
+      <h1>摆线针轮设计器</h1>
+      <p>解析齿廓 · 运动学仿真 · 接触分析 · DXF 导出</p>
     </div>
   </div>
+
   <div class="topbar-actions">
-    <nav class="toolnav" aria-label="工具切换">
-      <a href="/" class="active" aria-current="page">摆线针轮设计</a>
-      <a href="/lattice" title="把实体转成晶格结构（减重）">晶格化</a>
-    </nav>
+    <span class="engine-chip" id="perfChip" title="派生量在浏览器本地计算，不再请求服务器">
+      <i></i><span>本地计算</span>
+    </span>
+
     <label class="preset-wrap">
       <span>预设</span>
       <select id="presetSelect"></select>
     </label>
+
     <button class="btn" id="btnFit" title="适配视图（快捷键 F）">适配</button>
     <button class="btn" id="btnShare" title="复制带参数的分享链接">分享</button>
+
+    <label class="preset-wrap">
+      <span>导出</span>
+      <select id="exportPart" title="选择要导出的零件视图">
+        <option value="cycloid_disc">摆线轮</option>
+        <option value="pin_ring">针齿壳</option>
+        <option value="output_disc">输出盘</option>
+        <option value="assembly">装配图</option>
+        <option value="all_separate">三件分件</option>
+      </select>
+    </label>
+
     <div class="export-group">
-      <button class="btn primary" id="btnDxf">导出 DXF</button>
+      <button class="btn primary" id="btnDxf">DXF</button>
       <button class="btn" id="btnSvg">SVG</button>
       <button class="btn" id="btnPng">PNG</button>
       <button class="btn" id="btnJson" title="参数与派生量存档">JSON</button>
-      <button class="btn" id="btnLattice" title="用当前参数生成盘体并做晶格减重">晶格化 →</button>
+      <button class="btn" id="btnLattice" title="用当前参数在晶格化工作台生成盘体并做减重晶格">晶格化 →</button>
     </div>
   </div>
 </header>
@@ -49,7 +71,9 @@
 
   <section class="stage">
     <canvas id="view" tabindex="0" aria-label="几何视图"></canvas>
+
     <div class="hud" id="hud"></div>
+
     <div class="legend" id="legend">
       <span><i class="sw sw-profile"></i>摆线轮</span>
       <span><i class="sw sw-pin"></i>针齿</span>
@@ -57,6 +81,7 @@
       <span><i class="sw sw-theory"></i>理论齿廓</span>
       <span><i class="sw sw-contact"></i>接触点</span>
     </div>
+
     <div class="animbar">
       <button class="icon-btn primary" id="btnPlay" title="播放 / 暂停（空格）">▶</button>
       <button class="icon-btn" id="btnStepBack" title="反向单步（←）">◀◀</button>
@@ -81,6 +106,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/static/app.js"></script>
+<script type="module" src="/static/cycloid/app.js"></script>
 </body>
 </html>

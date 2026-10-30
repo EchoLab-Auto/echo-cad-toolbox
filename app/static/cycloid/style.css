@@ -1,0 +1,235 @@
+/* =============================================================================
+ * 摆线针轮设计器 · 专属样式
+ *
+ * 只写本工具需要的东西：三栏工作台布局（参数 / 画布 / 指标）、画布 HUD、
+ * 动画控制条、参数控件行。通用组件（按钮、面板、表单、指标卡）来自 base.css。
+ * 强调色沿用工程绿：齿廓即“材料”。
+ * ========================================================================== */
+
+@import url('/static/base.css');
+
+.app-cycloid {
+  --accent: #3fb950;
+  --accent-bright: #7ee787;
+  --accent-soft: #17301f;
+  --accent-line: #2ea043;
+  --pin: #58a6ff;
+  --hole: #d29922;
+  --theory: #6e7681;
+}
+
+body.app {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------
+ * 顶栏补充
+ * ------------------------------------------------------------------------ */
+
+.engine-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: #0d141c;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.engine-chip i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.engine-chip.busy i { background: var(--warn); box-shadow: 0 0 7px #d9a441aa; }
+.engine-chip b { color: var(--accent-bright); font-weight: 500; }
+
+.preset-wrap { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--fg-dim); }
+.preset-wrap select { height: 27px; min-width: 92px; font-family: var(--font); font-size: 11.5px; }
+
+.export-group {
+  display: flex;
+  gap: 5px;
+  padding-left: 9px;
+  margin-left: 2px;
+  border-left: 1px solid var(--line);
+}
+
+/* ---------------------------------------------------------------------------
+ * 三栏工作台
+ * ------------------------------------------------------------------------ */
+
+.layout {
+  display: grid;
+  grid-template-columns: 272px minmax(0, 1fr) 292px;
+  height: 100%;
+  min-height: 0;
+}
+
+.stage {
+  position: relative;
+  min-width: 0;
+  background:
+    radial-gradient(circle at 50% 45%, #101a24 0%, #070a0f 72%),
+    var(--bg);
+  overflow: hidden;
+}
+.stage::after {
+  /* 画布四周的暗角，让几何更聚焦 */
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, transparent 55%, #05070999 100%);
+}
+#view {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+#view.dragging { cursor: grabbing; }
+
+/* 画布浮层 */
+.hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
+  background: #0b1017cc;
+  backdrop-filter: blur(6px);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--fg-dim);
+  white-space: pre-line;
+  pointer-events: none;
+}
+.hud b { color: var(--fg-bright); font-weight: 600; }
+.hud .ok { color: var(--accent-bright); }
+.hud .bad { color: var(--danger); }
+
+.legend {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 11px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 60%;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #0b1017b0;
+  backdrop-filter: blur(6px);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 10.5px;
+  color: var(--fg-dim);
+}
+.legend span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.sw { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.sw-profile { background: var(--accent); }
+.sw-pin { background: var(--pin); }
+.sw-hole { background: var(--hole); }
+.sw-theory { background: var(--theory); }
+.sw-contact { background: #f0f6fc; }
+
+.animbar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #0b1017e0;
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 0 1px var(--line), 0 14px 30px -22px #000;
+}
+.slider-block { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--fg-dim); }
+.slider-block.grow { flex: 1 1 200px; min-width: 150px; }
+.slider-block input[type="range"] { width: 100%; }
+.slider-label { white-space: nowrap; }
+.slider-val { font-family: var(--mono); color: var(--fg-bright); min-width: 46px; text-align: right; }
+
+.toggles {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
+}
+.toggles label { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+.toggles label:hover { color: var(--fg-bright); }
+.toggles input { accent-color: var(--accent); }
+
+/* ---------------------------------------------------------------------------
+ * 参数控件（app.js 动态生成）
+ * ------------------------------------------------------------------------ */
+
+.ctrl { margin-bottom: 9px; }
+.ctrl-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.ctrl-head .name { font-size: 11.5px; color: var(--fg-dim); }
+.ctrl-head .hint { font-size: 10px; color: var(--fg-faint); font-family: var(--mono); margin: 0; }
+.ctrl-body { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 7px; align-items: center; }
+.ctrl-body input[type="number"] { height: 25px; font-size: 11.5px; text-align: right; padding-right: 6px; }
+.ctrl.auto .ctrl-body { grid-template-columns: minmax(0, 1fr); }
+.ctrl.auto input[type="number"]::placeholder { color: #46505d; }
+.ctrl.modified .ctrl-head .name { color: var(--accent-bright); }
+
+/* ---------------------------------------------------------------------------
+ * 指标面板
+ * ------------------------------------------------------------------------ */
+
+.metric-grid { grid-template-columns: 1fr 1fr; }
+
+.alerts { margin-top: 4px; }
+
+.kv-list { margin-bottom: 12px; }
+
+/* ---------------------------------------------------------------------------
+ * 窄屏：参数 → 画布 → 指标 纵向堆叠
+ * ------------------------------------------------------------------------ */
+
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: 240px minmax(0, 1fr) 252px; }
+}
+
+@media (max-width: 900px) {
+  body.app { height: auto; overflow: auto; }
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 62vh auto;
+    height: auto;
+  }
+  .panel-left { border-right: none; border-bottom: 1px solid var(--line); }
+  .panel-right { border-left: none; border-top: 1px solid var(--line); }
+  .panel { max-height: none; overflow: visible; }
+  .stage { min-height: 62vh; }
+  .legend { max-width: 52%; gap: 8px; font-size: 10px; }
+  .topbar { gap: 8px; }
+  .engine-chip { display: none; }
+}

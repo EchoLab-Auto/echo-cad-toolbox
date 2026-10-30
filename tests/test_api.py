@@ -104,12 +104,33 @@ def test_export_svg() -> None:
 
 
 def test_index_served() -> None:
-    r = client.get("/")
+    """首页是工具箱启动台，设计器在 /cycloid。"""
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "CAD 工具箱" in home.text
+    assert "/cycloid" in home.text and "/lattice" in home.text
+
+    r = client.get("/cycloid")
     assert r.status_code == 200
     assert "摆线针轮" in r.text
-    assert "/static/app.js" in r.text
+    assert "/static/cycloid/app.js" in r.text
 
 
 def test_static_assets() -> None:
-    for path in ("/static/app.js", "/static/style.css", "/static/favicon.svg"):
+    """三个页面的 CSS / JS / 着色器 / three.js 都能取到。"""
+    for path in (
+        "/static/favicon.svg",
+        "/static/base.css",
+        "/static/home/home.js",
+        "/static/home/home.css",
+        "/static/cycloid/app.js",
+        "/static/cycloid/style.css",
+        "/static/cycloid/analysis.js",
+        "/static/lattice/app.js",
+        "/static/lattice/style.css",
+        "/static/lattice/gpu/engine.js",
+        "/static/lattice/gpu/exporters.js",
+        "/static/lattice/gpu/lattice.wgsl",
+        "/static/vendor/three/build/three.module.js",
+    ):
         assert client.get(path).status_code == 200, path

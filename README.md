@@ -1,16 +1,28 @@
 # echo-cad-toolbox
 
-**摆线针轮设计器 + 晶格化工作台** —— 一个可部署在 Docker 中的 Web 工具箱，两个工具共用一套
-后端与前端风格：
+**摆线针轮设计器 + 晶格化工作台** —— 一个可部署在 Docker 中的 Web 工具箱。
 
-| 工具 | 路径 | 做什么 |
+**三个页面，两个工具，各自独立**（共用的只有设计令牌 `base.css` 与 three.js）：
+
+| 页面 | 路径 | 做什么 |
 | --- | --- | --- |
-| **摆线针轮设计器** | `/` | 交互式生成摆线针轮（RV / 摆线针轮减速器）齿廓、实时运动学仿真、啮合接触分析，导出**毫米级 DXF 图纸** |
-| **晶格化工作台** | `/lattice` | 把 STL / STEP 实体转成**晶格结构**（gyroid / Schwarz P / Diamond 等 TPMS 与 BCC / FCC / Octet 桁架），实时三维预览并导出 STL / 3MF / OBJ / PLY |
+| 工具箱首页 | `/` | 启动台：两张卡片进入两个工具，显示服务状态与版本 |
+| **摆线针轮设计器** | `/cycloid` | 交互式生成摆线针轮（RV / 摆线针轮减速器）齿廓、实时运动学仿真、啮合接触分析，导出**毫米级 DXF 图纸** |
+| **晶格化工作台** | `/lattice` | 把 STL / STEP 实体转成**晶格结构**（gyroid / Schwarz P / Diamond 等 TPMS 与 BCC / FCC / Octet 桁架），**浏览器 GPU 实时生成**并导出 STL / 3MF / OBJ / PLY |
 
-两个工具是**打通**的：设计器顶栏的「晶格化 →」会把当前齿廓参数带过去，晶格化工作台直接按参数
-生成 3D 摆线轮盘（齿廓拉伸 + 柱销孔 + 中心孔），再做成减重晶格 —— 从齿形设计到轻量化打印件
-不需要中间导出建模。
+两个工具在**计算上互不依赖**：删掉 `app/static/cycloid/` 晶格化照常用，反之亦然；
+两者只在"参数交接"上打通 —— 设计器顶栏的「晶格化 →」把齿廓参数带过去，工作台据此生成
+3D 轮盘（齿廓拉伸 + 柱销孔 + 中心孔）再做减重晶格，不需要中间导出建模。
+
+### 三种算力分配
+
+| 环节 | 在哪算 | 为什么 |
+| --- | --- | --- |
+| 齿廓 / 运动学 / 接触分析 | **浏览器**（`cycloid/analysis.js`，与服务端逐字段一致） | 拖动滑块零延迟、零请求；实测 1~10 ms（服务端同参数 5~45 ms + 网络往返） |
+| 体素化（网格 → 距离场） | 服务端**一次性**，按分辨率缓存 | 需要 trimesh/gmsh 的网格修复与射线求交，且每次模型只算一次 |
+| 晶格场 × 等值面提取 | **浏览器 GPU**（WebGPU 计算着色器） | 每次调参都要重算；实测 160³ 体素 **~100 ms**（服务端同参数 1~3 s），且不受服务端 1 GiB 内存上限约束 |
+
+> 没有 WebGPU 的浏览器会自动回退到服务端生成（老路径完整保留），界面上可以手动切换引擎。
 
 ![界面](docs/screenshot.png)
 
@@ -95,8 +107,9 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-访问 <http://localhost:8080>（摆线针轮设计器）与 <http://localhost:8080/lattice>（晶格化工作台）；
-API 文档在 <http://localhost:8080/docs>（晶格化接口在 `/api/lattice/*`）。
+访问 <http://localhost:8080>（工具箱首页）→ 摆线针轮设计器 <http://localhost:8080/cycloid>、
+晶格化工作台 <http://localhost:8080/lattice>；API 文档在 <http://localhost:8080/docs>
+（晶格化接口在 `/api/lattice/*`）。
 
 > 晶格化需要 `gmsh` 的 OCC 内核做 STEP 离散，`libgmsh.so` 在动态链接阶段依赖
 > OpenGL / X11 / freetype。Linux 桌面版一般已具备；无桌面的服务器需要装：
@@ -115,7 +128,7 @@ API 文档在 <http://localhost:8080/docs>（晶格化接口在 `/api/lattice/*`
 ```bash
 docker run -d --name echo-cad-toolbox --restart unless-stopped \
   -p 2228:8080 --memory 1g -v echo-cad-toolbox-data:/app/data \
-  echo-cad-toolbox:1.1.0
+  echo-cad-toolbox:1.2.0
 ```
 
 > **内存**：只用摆线针轮设计器时 512 MiB 绰绰有余；晶格化的峰值随体素分辨率上涨（实测，
@@ -183,6 +196,7 @@ python -m app.cli --parts assembly -o asm.dxf                            # 装�
 | **DXF 导出** | 毫米单位 1:1，分层（PROFILE/THEORY/PIN/HOLE/…），单零件或分件排布 |
 | **SVG / PNG / JSON** | 矢量预览、界面截图、参数与派生量存档 |
 | **分享链接** | 参数编码进 URL，一键复制 |
+| **本地实时分析** | 派生量 / 告警 / 接触表全部在浏览器算（`analysis.js`），拖滑块零延迟 |
 | **一键晶格化** | 把当前齿廓参数带到晶格化工作台，直接生成减重轮盘 |
 
 ### 晶格化工作台（`/lattice`）
@@ -195,9 +209,12 @@ python -m app.cli --parts assembly -o asm.dxf                            # 装�
 | **4 种应用方式** | 内部填充、仅表层壳内填充、挖减重腔、外扩融合；可叠加「保留原始外表皮」 |
 | **毫米级厚度** | TPMS 用归一化梯度 `s/\|∇s\|` 换算真实距离场，壁厚/杆径按 mm 直接给，任意单胞尺寸都均匀 |
 | **有机形态** | 域扭曲让晶格走向自然；Z 向渐变让单胞尺寸沿高度连续变化 |
-| **参数可控** | 体素分辨率 48 ~ 320、平滑迭代、抽稀比例，面数与精度自己权衡 |
+| **浏览器 GPU 生成** | WebGPU 计算着色器：晶格场 + 等值面提取全在显卡上跑，改参数即时重算；无 WebGPU 自动回退服务端 |
+| **Surface Nets + Newton 投影** | 顶点被推到真实零等值面上，亚体素精度（0.5 mm 体素下球面误差 0.004 mm），小孔不被"体素阶梯"磨圆 |
+| **精度诊断** | 显示体素尺寸、模型最小内孔半径与「孔径 / 体素」比，一键按最小特征推荐分辨率 |
+| **参数可控** | 体素分辨率 48 ~ 320（GPU 下只受显存限制），服务端模式另有平滑 / 抽稀 |
 | **三维预览** | 原始 / 晶格 / 叠加三视图、线框、自动旋转、适配视角 |
-| **导出** | STL / 3MF / OBJ / PLY，单位毫米，直接进切片软件或 CAE 前处理 |
+| **导出** | STL / 3MF / OBJ / PLY，单位毫米；GPU 生成的网格**在浏览器里直接写文件**，不经过服务器 |
 
 ---
 
@@ -303,9 +320,14 @@ curl -OJ "localhost:8080/api/export/dxf?tooth_count=39&eccentricity=1.43&pin_cir
 | POST | `/api/lattice/samples/{name}` | 内置样例：cube / sphere / cylinder / bracket / tube |
 | GET | `/api/lattice/jobs/{id}` | 作业状态（`status` / `progress` / `stage` / `stats`） |
 | POST | `/api/lattice/jobs/{id}/generate` | 传晶格参数，后台生成 |
+| GET | `/api/lattice/jobs/{id}/volume?resolution=160` | **体素 SDF 体场**（float32 原始字节，元数据在 `X-Volume-Meta` 头）—— 浏览器 GPU 生成用 |
 | GET | `/api/lattice/jobs/{id}/preview/{original,lattice}` | GLB 预览 |
 | GET | `/api/lattice/jobs/{id}/download/{stl,3mf,obj,ply}` | 下载产物 |
 | DELETE | `/api/lattice/jobs/{id}` | 删除作业 |
+
+> 体素场接口是 GPU 路径的唯一服务端依赖：服务端把（作业, 分辨率）组合的结果缓存成
+> `volume.npz`，重复请求不会重算；返回的二进制按 `X-Volume-Meta` 里的
+> `shape` / `pitch` / `origin` 解释（C 序，单位 mm）。
 
 作业状态机：`new → preparing（体素化）→ ready → running（生成）→ done | error`。
 
@@ -358,11 +380,19 @@ echo-cad-toolbox/
 │   │   ├── jobs.py         #   作业层：上传 / 体素缓存 / 后台生成 / 产物
 │   │   ├── cycloid.py      #   摆线齿廓 → 3D 轮盘实体（两工具衔接点）
 │   │   └── api.py          #   /api/lattice 路由
-│   └── static/         # 前端（原生 JS，无构建步骤）
-│       ├── index.html / app.js / style.css    # 摆线针轮设计器（2D Canvas）
-│       └── lattice/                            # 晶格化工作台（three.js）
-│           ├── index.html / app.js / style.css
-│           └── vendor/three/                   # three.js 本地副本（离线可用）
+│   └── static/         # 前端（原生 ES module，无构建步骤）
+│       ├── base.css                            # 共用设计令牌与基础组件
+│       ├── home/                               # 工具箱首页（启动台）
+│       ├── cycloid/                            # 摆线针轮设计器（2D Canvas，自带主题）
+│       │   ├── index.html / app.js / style.css
+│       │   └── analysis.js                     #   浏览器端派生量（与后端逐字段一致）
+│       ├── lattice/                            # 晶格化工作台（three.js + WebGPU，自带主题）
+│       │   ├── index.html / app.js / style.css
+│       │   └── gpu/                            #   浏览器 GPU 生成引擎
+│       │       ├── engine.js                   #     缓冲区编排 / 三次 dispatch / 回读
+│       │       ├── lattice.wgsl                #     晶格场 + 等值面提取（计算着色器）
+│       │       └── exporters.js                #     STL / OBJ / PLY / 3MF 客户端导出
+│       └── vendor/three/                       # three.js 本地副本（离线可用）
 ├── tests/              # pytest：几何 / API / DXF / 晶格化
 ├── tools/
 │   ├── browser_check.py    # 摆线设计器的无头浏览器检查（JS 错误 + 画布像素）
@@ -381,12 +411,14 @@ echo-cad-toolbox/
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                     # 66 项单元 / 接口测试（含 27 项晶格化）
+python -m pytest -q                     # 单元 / 接口测试（几何、DXF、晶格化、体素精度）
 
 # 端到端（需先启动服务；会捕获 JS 错误并做画布像素统计）
 playwright install chromium
-python tools/browser_check.py http://127.0.0.1:8080/      # 摆线设计器
-python tools/lattice_check.py http://127.0.0.1:8080/      # 晶格化工作台
+python tools/browser_check.py http://127.0.0.1:8080/cycloid   # 摆线设计器：渲染 / 交互 / DXF
+python tools/lattice_check.py http://127.0.0.1:8080/          # 三页 + GPU 生成 + 客户端导出
+python tools/analysis_parity.py http://127.0.0.1:8080/        # 前端分析 vs 服务端，逐字段比对
+python tools/gpu_check.py http://127.0.0.1:8080/              # WebGPU 引擎：精度 / 小孔 / 9 种晶格
 
 # 重新生成 README 配图
 python tools/shoot.py http://127.0.0.1:8080/
@@ -420,24 +452,68 @@ python tools/shoot.py http://127.0.0.1:8080/
 
 性能参考（i7 级 CPU，单件）：
 
-| 场景 | 体素化 | 生成 | 面数 |
-| --- | --- | --- | --- |
-| 立方体 40×30×24 + gyroid（128） | 0.3 s | 2.0 s | 330 k |
-| L 支架 + gyroid（144） | 0.5 s | 1.5 s | 200 k |
-| 摆线轮盘 Zc=39 + gyroid 壳内填充（128） | 0.6 s | 1.1 s | 98 k |
-| STEP 带孔件 + gyroid（160） | 1.0 s | 4.8 s | 640 k |
+| 场景 | 体素化 | 生成（服务端） | 生成（浏览器 GPU） | 面数 |
+| --- | --- | --- | --- | --- |
+| 立方体 40×30×24 + gyroid（160） | 0.3 s | 2.0 s | **0.12 s** | 900 k |
+| 圆柱 ⌀36×40 + gyroid（160） | 0.4 s | 1.5 s | **0.11 s** | 1.27 M |
+| 摆线轮盘 Zc=39 + gyroid 壳内填充（128） | 0.6 s | 1.1 s | **0.08 s** | 98 k |
+| STEP 带孔件 + gyroid（160） | 1.0 s | 4.8 s | **0.15 s** | 640 k |
 
-### 晶格化算法要点
+> 体素化是一次性的（按作业 × 分辨率缓存），调晶格参数时只有"生成"这一步会重跑 ——
+> 这正是把生成挪到 GPU 收益最大的地方。
+
+### 毫米级小孔的精度
+
+体素法是"栅格近似"，毫米级小孔最容易翻车（糊死、变方孔、孔口被磨圆）。这里做了四件事：
+
+| 手段 | 效果 |
+| --- | --- |
+| **精确窄带距离场**（`voxel.py`） | 表面附近 3 个体素内用**点到三角形的精确距离**替代 EDT 量化值；远场仍用 EDT，两者连续过渡 |
+| **Surface Nets + Newton 投影**（`lattice.wgsl`） | 每个等值面单元一个顶点，再用 2 步 Newton 把它推到 `f = 0` 的真实等值面上，顶点位置误差 ≈ `h²` 量级而不是 `h/2` |
+| **不做抽稀** | GPU 路径默认不抽稀（服务端的"二次误差抽稀 30%"会直接抹掉小孔），分辨率就是唯一精度旋钮 |
+| **精度诊断 + 自动分辨率** | 体素化后统计模型里最小的内腔半径，界面直接给出「孔径 / 体素」比与推荐分辨率，点一下就切过去 |
+
+实测两块（`tools/gpu_check.py` 测提取，`tests/test_voxel_precision.py` 测体素化）：
+
+| 指标 | 数值 |
+| --- | --- |
+| **等值面提取**（pitch = 0.5 mm，解析球）顶点径向误差 | 平均 0.0028 mm、p95 0.0042 mm、最大 0.0044 mm |
+| 球体体积相对误差 | 0.07% |
+| Ø2 mm 通孔（孔宽仅 4 个体素）孔壁半径误差（GPU 提取） | 0.034 mm |
+| 孔轴附近被堵住的顶点 | 0 个 |
+| 三角形绕序一致率（有向体积为正） | 100% |
+| **体素化**（pitch = 0.98 mm，Ø2 mm 孔）孔壁半径误差：纯 EDT → 窄带精确 | **0.463 mm → 0.007 mm** |
+| 同一模型体素化耗时（pitch = 0.98 / 0.5 / 0.25 mm） | 0.08 / 0.38 / 1.2 s（EDT）→ 0.7 / 1.6 / 3.6 s（含精确窄带） |
+
+> 窄带精确化是"一次性成本"（每个 模型 × 分辨率 只算一次，之后都读缓存），
+> 换来的是毫米级小孔的孔壁位置从"半个体素"的误差降到亚体素。
+
+### 晶格化算法要点（服务端 / GPU 共用的数学）
 
 1. **体素化**：对每个 (x, y) 栅格列沿 −Z 发一条射线，收集与全部三角面的交点，排序后按
    **奇偶规则**填充成占据栅格。比逐体素做包含性测试快一个量级，也不依赖拾取引擎的包围体实现。
-2. **SDF**：占据栅格做欧氏距离变换（EDT）得到内外距离，带 `0.5·pitch` 的体素中心修正，
-   使零等值面落在真实表面位置；再做边界保护（最外 1.6 层强制为外部），保证等值面在体场内闭合。
+2. **SDF**：占据栅格给符号，表面附近窄带用精确的点-三角形距离，远场用欧氏距离变换（EDT），
+   带 `0.5·pitch` 的体素中心修正；再做边界保护（最外 1.6 层强制为外部），保证等值面在体场内闭合。
 3. **晶格场**：TPMS 用 `s/\|∇s\|`（解析梯度）把函数值换算成**真实距离**，所以壁厚是毫米直给；
    杆系利用立方对称性把坐标折叠到单胞 1/8 象限，最近杆族收缩成 1~4 条代表线段求距离 —— 计算量
-   与单胞尺寸无关，且天然无断口。
+   与单胞尺寸无关，且天然无断口。**同一套公式在 Python 与 WGSL 里各实现一遍**，两边结果一致
+   （相对密度实测 35.3% vs 解析预估 34.8%）。
 4. **组合**：按应用方式对实体 SDF 与晶格场取 `max` / `min`（隐式布尔），比网格布尔稳定得多。
-5. **网格化**：marching cubes → Taubin 平滑 → 二次误差抽稀 → 连通分量清理 → 补洞。
+5. **网格化**：GPU 走 Surface Nets + Newton 投影；服务端走 marching cubes → Taubin 平滑 →
+   二次误差抽稀 → 连通分量清理 → 补洞。
+
+### 客户端 GPU 的三次 dispatch
+
+```
+① field_main   nx×ny×nz 个体素：lattice(world_pos) 与实体 SDF 组合 → 组合场
+② count_main   (nx-1)(ny-1)(nz-1) 个单元：只数"有多少顶点、多少个四边形"
+              → 回读 8 字节计数 → 精确分配顶点/索引缓冲区（不会溢出、不浪费显存）
+③ vert_main    每个等值面单元写一个顶点（Surface Nets + 2 步 Newton 投影 + 梯度法向）
+   index_main  每条穿过等值面的栅格棱写一个四边形（对偶网格，顶点天然去重）
+```
+
+生成的索引网格直接进 three.js；导出时在浏览器里写 STL / OBJ / PLY / 3MF（3MF 用一个
+store-only 的最小 ZIP 写入器，不引入第三方库）。
 
 ---
 

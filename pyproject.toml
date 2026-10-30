@@ -1,6 +1,6 @@
 [project]
 name = "echo-cad-toolbox"
-version = "1.1.0"
+version = "1.2.0"
 description = "Cycloidal pin-wheel designer (profile, simulation, DXF) + lattice infill workbench"
 requires-python = ">=3.10"
 

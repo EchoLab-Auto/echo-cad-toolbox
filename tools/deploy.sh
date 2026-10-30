@@ -9,7 +9,7 @@
 #
 # 环境变量：
 #   PORT          宿主机端口（默认 8080）
-#   IMAGE         镜像标签（默认 echo-cad-toolbox:1.1.0）
+#   IMAGE         镜像标签（默认 echo-cad-toolbox:1.2.0）
 #   NAME          容器名（默认 echo-cad-toolbox）
 #   PIP_INDEX_URL PyPI 镜像，**必须**通过 --build-arg 传递（Dockerfile 里是 ARG）
 #   PYTHON_IMAGE  基础镜像来源（拉不到官方镜像时用加速源）
@@ -31,7 +31,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 PORT="${1:-${PORT:-8080}}"
-IMAGE="${IMAGE:-echo-cad-toolbox:1.1.0}"
+IMAGE="${IMAGE:-echo-cad-toolbox:1.2.0}"
 NAME="${NAME:-echo-cad-toolbox}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 PYTHON_IMAGE="${PYTHON_IMAGE:-python:3.12-slim}"

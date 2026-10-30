@@ -4,4 +4,4 @@
 * ``app.lattice``：STL / STEP → 晶格结构的隐式场工具链
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

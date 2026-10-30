@@ -1,15 +1,23 @@
 /* ---------------------------------------------------------------------------
- * 晶格化工作台前端
+ * 晶格化工作台 —— 前端主逻辑
  *
- * * 两个模型来源：摆线轮参数（服务端生成 3D 轮盘）/ 上传 STL·STEP
- * * 参数表单 → POST /api/lattice/jobs/{id}/generate → 轮询状态 → three.js 预览
- * * 支持从摆线设计器的分享链接（?p=…）带入参数，做到"设计完直接晶格化"
+ * 两条算路，用户可切换（默认走浏览器 GPU）：
+ *
+ *   GPU（WebGPU）  服务端只做一次性体素化，之后每次参数调整都在显卡上算：
+ *                  晶格场 × 实体场 → Surface Nets + Newton 投影 → 索引网格。
+ *                  实测 160³ 体素约 100~200 ms，且不受服务端 1 GiB 内存限制。
+ *   服务器         传统路径：POST /generate → 轮询 → 拉 GLB 预览。
+ *                  老浏览器 / 没有 WebGPU 时的兜底。
+ *
+ * 导出：GPU 生成的网格直接在浏览器里写 STL / 3MF / OBJ / PLY，不经过服务器。
  * ------------------------------------------------------------------------ */
 
 import * as THREE from 'three';
-import { OrbitControls } from '/static/lattice/vendor/three/examples/jsm/controls/OrbitControls.js';
-import { GLTFLoader } from '/static/lattice/vendor/three/examples/jsm/loaders/GLTFLoader.js';
-import { RoomEnvironment } from '/static/lattice/vendor/three/examples/jsm/environments/RoomEnvironment.js';
+import { OrbitControls } from '/static/vendor/three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from '/static/vendor/three/examples/jsm/loaders/GLTFLoader.js';
+import { RoomEnvironment } from '/static/vendor/three/examples/jsm/environments/RoomEnvironment.js';
+import { GpuLatticeEngine } from './gpu/engine.js';
+import { exportMesh } from './gpu/exporters.js';
 
 const API = '/api/lattice';
 
@@ -19,13 +27,20 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   config: null,
   job: null,
-  source: 'cycloid',
   view: 'original',
   wireframe: false,
   autoRotate: false,
   busy: false,
   pollTimer: null,
   latticeVersion: -1,
+  /** 'gpu' | 'server' */
+  engineMode: 'server',
+  engine: null,           // GpuLatticeEngine 实例
+  engineProbe: null,      // { supported, label }
+  volume: null,           // { meta, jobId, resolution, features }
+  mesh: null,             // { positions, normals, indices, stats }
+  features: null,
+  lastMs: 0,
 };
 
 /* =========================================================================
@@ -39,10 +54,10 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x080b10);
+scene.background = new THREE.Color(0x06090d);
 
 const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.05).texture;
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.02).texture;
 
 const camera = new THREE.PerspectiveCamera(42, 1, 0.5, 20000);
 camera.position.set(150, 120, 190);
@@ -77,6 +92,7 @@ const matOriginal = new THREE.MeshStandardMaterial({
 });
 const matLattice = new THREE.MeshStandardMaterial({
   color: 0x56d4b8, metalness: 0.6, roughness: 0.28, envMapIntensity: 1.15,
+  side: THREE.DoubleSide,
 });
 
 const loader = new GLTFLoader();
@@ -91,11 +107,11 @@ function resize() {
 }
 new ResizeObserver(resize).observe(canvas.parentElement);
 
-// 调试 / 支持用钩子（不参与业务逻辑）：控制台里 __lattice.state 可看作业状态
+// 调试 / 自动化测试钩子（不参与业务逻辑）
 window.__lattice = {
   state, scene, camera, renderer, controls,
   groups: { original: groupOriginal, lattice: groupLattice },
-  frameAll,
+  frameAll, generate, setEngine,
 };
 
 function animate() {
@@ -118,11 +134,8 @@ function applyMaterial(root, material) {
     if (!o.isMesh) return;
     o.material = material;
     o.frustumCulled = false;
-    // trimesh 导出的 GLB 只带 POSITION，没有 NORMAL。缺法向时 PBR 光照失效，
-    // 模型会渲染成纯黑（看起来像"没加载出来"），这里补算一次。
     const geom = o.geometry;
-    if (geom && !geom.attributes.normal) {
-      if (!geom.attributes.position) return;
+    if (geom && !geom.attributes.normal && geom.attributes.position) {
       geom.computeVertexNormals();
     }
   });
@@ -132,9 +145,16 @@ function sceneBounds() {
   const box = new THREE.Box3();
   let has = false;
   for (const group of [groupLattice, groupOriginal]) {
-    if (group.children.length === 0) continue;
+    if (group.children.length === 0 || !group.visible) continue;
     box.expandByObject(group);
     has = true;
+  }
+  if (!has) {
+    for (const group of [groupLattice, groupOriginal]) {
+      if (group.children.length === 0) continue;
+      box.expandByObject(group);
+      has = true;
+    }
   }
   return has ? box : null;
 }
@@ -177,10 +197,10 @@ let toastTimer = null;
 function toast(message, ok = false) {
   const el = $('#toast');
   el.textContent = message;
-  el.classList.toggle('ok', ok);
-  el.hidden = false;
+  el.classList.toggle('err', !ok);
+  el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, ok ? 2600 : 6500);
+  toastTimer = setTimeout(() => el.classList.remove('show'), ok ? 2400 : 6000);
 }
 
 const setStatus = (text, right = '') => {
@@ -190,11 +210,67 @@ const setStatus = (text, right = '') => {
 
 function showProgress(pct, stage) {
   $('#progressOverlay').hidden = false;
-  $('#progressFill').style.width = `${Math.round(pct * 100)}%`;
+  $('#progressFill').style.width = `${Math.max(0, Math.min(1, pct)) * 100}%`;
   $('#progressPct').textContent = `${Math.round(pct * 100)}%`;
   $('#progressStage').textContent = stage || '处理中…';
 }
 const hideProgress = () => { $('#progressOverlay').hidden = true; };
+
+const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+/* =========================================================================
+ * 计算引擎探测
+ * ====================================================================== */
+async function probeEngine() {
+  const chip = $('#engineChip');
+  const label = $('#engineLabel');
+  const hint = $('#engineHint');
+  const gpuBtn = $('#engineSeg button[data-engine="gpu"]');
+
+  try {
+    state.engine = await GpuLatticeEngine.create();
+  } catch (err) {
+    console.warn('[lattice] WebGPU 初始化失败：', err);
+    state.engine = null;
+  }
+
+  if (!state.engine) {
+    state.engineMode = 'server';
+    gpuBtn.disabled = true;
+    chip.classList.add('server');
+    label.textContent = '服务器计算';
+    hint.textContent = '当前浏览器不支持 WebGPU（Chrome/Edge 113+、Safari 26+），改用服务端生成。';
+    setEngine('server');
+    return;
+  }
+
+  state.engineMode = 'gpu';
+  gpuBtn.disabled = false;
+  chip.classList.add('gpu');
+  const maxRes = estimateMaxResolution(state.engine);
+  label.textContent = `GPU · ${state.engine.adapterLabel}`;
+  hint.textContent = `浏览器 GPU 直接生成（${state.engine.adapterLabel}），本机可跑 ${maxRes} 分辨率；只向服务器要一次性体素场。`;
+  setEngine('gpu');
+}
+
+/** 按适配器缓冲区上限估算可用分辨率（立方体网格） */
+function estimateMaxResolution(engine) {
+  const voxels = engine.maxVoxels;
+  return Math.max(48, Math.min(400, Math.floor(Math.cbrt(voxels / 1.6))));
+}
+
+function setEngine(mode) {
+  state.engineMode = mode;
+  $$('#engineSeg button').forEach((b) => b.classList.toggle('active', b.dataset.engine === mode));
+  // 平滑 / 抽稀只在服务端生成时存在（GPU 路径不抽稀，保证小孔不被抹掉）
+  $$('.server-only').forEach((el) => el.classList.toggle('server-only-off', mode !== 'server'));
+  const badge = $('#engineChip');
+  if (badge) {
+    badge.classList.toggle('gpu', mode === 'gpu');
+    badge.classList.toggle('server', mode === 'server');
+  }
+  if (state.config) applyResourceLimits(state.config);
+}
 
 /* =========================================================================
  * 配置 → 表单
@@ -235,129 +311,80 @@ function populateConfig(cfg) {
   $('#wallSel').value = cfg.defaults.wall_mode || 'sheet';
   $('#skinChk').checked = !!cfg.defaults.keep_skin;
 
-  syncLatticeUI();
+  syncLatticeLabels();
+  syncModeHint();
+  syncDensity();
   syncOutputs();
 }
 
-/**
- * 按服务端探测到的内存能力限制分辨率选项。
- *
- * 体素化的内存开销随分辨率线性上涨（160→380MB，200→830MB，256→1.4GB+），
- * 在内存紧张的机器上选高分辨率会把容器 OOM 掉、连带丢掉所有作业。
- * 这里直接把超限选项禁用，并把默认值拉到允许范围内。
- */
+/** 服务端内存上限决定的分辨率上限（GPU 模式下不受限） */
 function applyResourceLimits(cfg) {
-  const res = cfg.resources || {};
-  const ceiling = Number(res.max_resolution) || 320;
-  const sel = $('#resSel');
-  let best = null;
-  for (const opt of sel.options) {
-    const value = Number(opt.value);
-    const allowed = value <= ceiling;
-    opt.disabled = !allowed;
-    if (allowed) best = opt.value;
-    opt.textContent = opt.textContent.replace(/（.*?不允许）$/, '');
-    if (!allowed) opt.textContent += '（内存不允许）';
-  }
-  const wanted = String(cfg.defaults.resolution);
-  sel.value = Number(wanted) <= ceiling ? wanted : String(best || ceiling);
+  const resSel = $('#resSel');
+  const serverLimit = cfg?.resources?.max_resolution ?? 320;
+  state.serverMaxRes = serverLimit;
 
-  const note = $('#resHint');
-  if (note) {
-    const mem = res.memory_limit_mb;
-    note.textContent = mem
-      ? `本机可用内存约 ${mem} MB，分辨率上限 ${ceiling}（再高会因内存不足中断）。`
-      : '';
-    note.hidden = !mem;
+  // GPU 模式下分辨率只受显存限制（服务端只做一次性体素化，但服务端的内存
+  // 上限仍然约束它算得出来的体场分辨率，所以两边取各自的上限）
+  const gpuLimit = state.engine ? estimateMaxResolution(state.engine) : serverLimit;
+  const limit = state.engineMode === 'gpu' ? Math.max(serverLimit, Math.min(400, gpuLimit)) : serverLimit;
+
+  const allowed = [];
+  for (const opt of resSel.options) {
+    const v = Number(opt.value);
+    opt.disabled = v > limit;
+    if (v <= limit) allowed.push(v);
   }
+  if (+resSel.value > limit) resSel.value = String(allowed[allowed.length - 1] || 96);
+
+  const hint = $('#resHint');
+  hint.hidden = false;
+  hint.textContent = state.engineMode === 'gpu'
+    ? `GPU 模式：显卡可跑 ${limit} 分辨率，只向服务器要一次性体素场（服务端最高 ${serverLimit}）。`
+    : `服务端检测到内存上限 ${cfg?.resources?.memory_limit_mb ?? '?'} MB，最高 ${serverLimit} 分辨率；切到浏览器 GPU 可更高。`;
 }
 
-function syncLatticeUI() {
-  const kind = $('#latticeSel').value;
-  const info = state.config?.lattices?.[kind];
+function syncLatticeLabels() {
+  const key = $('#latticeSel').value;
+  const info = state.config?.lattices?.[key];
   $('#latticeDesc').textContent = info?.desc || '';
   const isTpms = info?.family === 'tpms';
-  $('#wallSel').closest('.field').hidden = !isTpms;
-  $('#thickLabel').textContent = isTpms ? '壁厚' : '杆直径';
-  $('#thickRange').max = isTpms ? '12' : '10';
+  const thickLabel = $('#thickLabel');
+  if (thickLabel) thickLabel.textContent = isTpms ? '壁厚' : '杆径';
+  $('#wallSel').disabled = !isTpms;
 }
 
-function syncOutputs() {
-  const cell = +$('#cellRange').value;
-  const thick = +$('#thickRange').value;
-  $('#cellOut').textContent = `${cell.toFixed(1)} mm`;
-  $('#thickOut').textContent = `${thick.toFixed(2)} mm`;
-  $('#shellOut').textContent = `${(+$('#shellRange').value).toFixed(1)} mm`;
-  $('#resOut').textContent = $('#resSel').value;
-  $('#warpOut').textContent = (+$('#warpRange').value).toFixed(2);
-  $('#gradOut').textContent = (+$('#gradRange').value).toFixed(2);
-  $('#smoothOut').textContent = $('#smoothRange').value;
-  $('#decOut').textContent = `${Math.round(+$('#decRange').value * 100)}%`;
-
+function syncModeHint() {
   const mode = $('#modeSel').value;
   $('#shellField').hidden = mode !== 'shell';
-  $('#modeDesc').textContent = state.config?.modes?.[mode] || '';
-
-  // 摆线轮参数读数
-  $('#czcOut').textContent = $('#czc').value;
-  $('#ceOut').textContent = `${(+$('#ce').value).toFixed(2)} mm`;
-  $('#crzOut').textContent = `${(+$('#crz').value).toFixed(1)} mm`;
-  $('#crpOut').textContent = `${(+$('#crp').value).toFixed(2)} mm`;
-  $('#cwidthOut').textContent = `${(+$('#cwidth').value).toFixed(1)} mm`;
-  renderCycloidKpi();
-
-  // 相对密度预估（与后端 estimate_relative_density 同一套校准系数）
-  const kind = $('#latticeSel').value;
-  const info = state.config?.lattices?.[kind];
-  const t = Math.min(thick, 0.8 * cell);
-  let rho = 0.2;
-  if (info?.family === 'tpms' && TPMS_DENSITY[kind]) {
-    rho = (TPMS_DENSITY[kind] * t) / cell;
-  } else if (STRUT_LENGTH[kind]) {
-    rho = ((STRUT_LENGTH[kind] * Math.PI * (t / 2) ** 2) / (cell * cell)) * STRUT_OVERLAP[kind];
-  }
-  rho = Math.max(0.005, Math.min(0.95, rho));
-  $('#densityFill').style.width = `${(rho * 100).toFixed(1)}%`;
-  $('#densityPct').textContent = `${(rho * 100).toFixed(1)} %`;
-}
-
-function renderCycloidKpi() {
-  const zc = +$('#czc').value;
-  const e = +$('#ce').value;
-  const rz = +$('#crz').value;
-  const rp = +$('#crp').value;
-  const k1 = (e * (zc + 1)) / rz;
-  const tip = rz - e * (zc + 1);
-  const ok = k1 > 0.2 && k1 < 0.95 && tip > 0;
-  $('#cycloidKpi').innerHTML = `
-    <div><span>针齿数 Zp</span><b>${zc + 1}</b></div>
-    <div><span>传动比 i</span><b>${zc}:1</b></div>
-    <div><span>短幅系数 K1</span><b style="color:${ok ? 'var(--lattice)' : 'var(--warn)'}">${k1.toFixed(3)}</b></div>
-    <div><span>齿顶圆 ⌀</span><b>${(2 * (rz - rp - e)).toFixed(0)} mm</b></div>
-  `;
-}
-
-function clampThickness() {
-  const cell = +$('#cellRange').value;
-  const thickEl = $('#thickRange');
-  const limit = Math.max(0.2, Math.min(+thickEl.max, 0.8 * cell));
-  if (+thickEl.value > limit) thickEl.value = limit.toFixed(2);
+  const hints = {
+    intersect: '只在实体内部生成晶格，外形与原模型一致。',
+    shell: '仅保留表层壳内的一层晶格，内部空心，减重最多。',
+    subtract: '从实体里挖出晶格空腔（做减重腔，保留外表面）。',
+    union: '晶格向实体外延伸，得到外扩的复合结构。',
+  };
+  $('#modeDesc').textContent = hints[mode] || '';
+  syncDensity();
 }
 
 function collectParams() {
+  const cell = +$('#cellRange').value;
+  const thickness = Math.min(+$('#thickRange').value, 0.8 * cell);
   return {
     lattice: $('#latticeSel').value,
-    cell_size: +$('#cellRange').value,
-    thickness: +$('#thickRange').value,
+    cell_size: cell,
+    thickness,
     wall_mode: $('#wallSel').value,
     mode: $('#modeSel').value,
     shell_thickness: +$('#shellRange').value,
     keep_skin: $('#skinChk').checked,
+    skin_thickness: 1.2,
     resolution: +$('#resSel').value,
     warp: +$('#warpRange').value,
     grad: +$('#gradRange').value,
+    grad_height: state.job?.info?.extents?.[2] || null,
     smooth: +$('#smoothRange').value,
-    decimate: +$('#decRange').value,
+    decimate: 0,
+    align: 'min',
   };
 }
 
@@ -371,6 +398,69 @@ function collectCycloid() {
     },
     width: +$('#cwidth').value,
   };
+}
+
+function clampThickness() {
+  const cell = +$('#cellRange').value;
+  const thickEl = $('#thickRange');
+  const limit = Math.max(0.2, Math.min(+thickEl.max, 0.8 * cell));
+  if (+thickEl.value > limit) thickEl.value = limit.toFixed(2);
+}
+
+function syncDensity() {
+  const key = $('#latticeSel').value;
+  const cell = +$('#cellRange').value || 8;
+  const t = Math.min(+$('#thickRange').value, 0.8 * cell);
+  const mode = $('#modeSel').value;
+  let rho;
+  if (TPMS_DENSITY[key]) {
+    rho = Math.min(0.95, Math.max(0.005, TPMS_DENSITY[key] * (t / cell)));
+  } else if (STRUT_LENGTH[key]) {
+    const r = t / 2;
+    rho = Math.min(0.97, Math.max(0.002, (STRUT_LENGTH[key] * Math.PI * r * r * STRUT_OVERLAP[key]) / (cell * cell)));
+  } else {
+    rho = 0.2;
+  }
+  $('#densityPct').textContent = `${(rho * 100).toFixed(1)} %`;
+  $('#densityFill').style.width = `${Math.min(100, rho * 100).toFixed(1)}%`;
+  $('#densityPct').style.color = rho > 0.6 ? 'var(--warn)' : '';
+  if (mode === 'subtract') {
+    $('#densityPct').textContent = `${((1 - rho) * 100).toFixed(1)} %（挖空 ${(rho * 100).toFixed(0)}%）`;
+  }
+}
+
+function syncOutputs() {
+  $('#cellOut').textContent = `${(+$('#cellRange').value).toFixed(1)} mm`;
+  $('#thickOut').textContent = `${(+$('#thickRange').value).toFixed(2)} mm`;
+  $('#shellOut').textContent = `${(+$('#shellRange').value).toFixed(1)} mm`;
+  $('#warpOut').textContent = (+$('#warpRange').value).toFixed(2);
+  $('#gradOut').textContent = (+$('#gradRange').value).toFixed(2);
+  $('#smoothOut').textContent = $('#smoothRange').value;
+  $('#decOut').textContent = `${Math.round(+$('#decRange').value * 100)}%`;
+  $('#resOut').textContent = $('#resSel').value;
+  syncCycloidOutputs();
+}
+
+function syncCycloidOutputs() {
+  const zc = +$('#czc').value;
+  const e = +$('#ce').value;
+  const rz = +$('#crz').value;
+  const rp = +$('#crp').value;
+  $('#czcOut').textContent = String(zc);
+  $('#ceOut').textContent = `${e.toFixed(2)} mm`;
+  $('#crzOut').textContent = `${rz.toFixed(1)} mm`;
+  $('#crpOut').textContent = `${rp.toFixed(2)} mm`;
+  $('#cwidthOut').textContent = `${(+$('#cwidth').value).toFixed(1)} mm`;
+
+  const k1 = (e * (zc + 1)) / rz;
+  const tip = rz - e * (zc + 1);
+  const ok = k1 > 0.2 && k1 < 0.95 && tip > 0;
+  $('#cycloidKpi').innerHTML = `
+    <div><span>针齿数 Zp</span><b>${zc + 1}</b></div>
+    <div><span>传动比 i</span><b>${zc}:1</b></div>
+    <div><span>短幅系数 K1</span><b style="color:${ok ? 'var(--lattice)' : 'var(--warn)'}">${k1.toFixed(3)}</b></div>
+    <div><span>齿顶圆 ⌀</span><b>${(2 * (rz - rp - e)).toFixed(0)} mm</b></div>
+  `;
 }
 
 /* =========================================================================
@@ -389,7 +479,7 @@ function setView(view) {
 }
 
 /* =========================================================================
- * 作业
+ * 作业状态
  * ====================================================================== */
 function setBusy(busy) {
   state.busy = busy;
@@ -443,19 +533,140 @@ function renderModelInfo(job) {
   $('#modelInfo').hidden = false;
 }
 
-function renderStats(stats) {
+function renderStats(stats, extra = {}) {
   if (!stats) return;
+  const origVol = state.job?.info?.volume || stats.original_volume_mm3 || 0;
   const rows = [
     ['面数', Number(stats.faces).toLocaleString()],
+    ['顶点', Number(stats.vertices || 0).toLocaleString()],
     ['体积', `${(stats.volume_mm3 / 1000).toFixed(2)} cm³`],
-    ['材料体积', `${(stats.material_volume_mm3 / 1000).toFixed(2)} cm³`],
-    ['相对密度', `${(stats.relative_density * 100).toFixed(1)} %`],
-    ['网格闭合', stats.boundary_edges === 0 ? '是' : `否（${stats.boundary_edges} 条开口边）`],
-    ['体素', `${stats.voxel_pitch.toFixed(3)} mm`],
-    ['耗时', `${stats.seconds} s`],
+    ['表面积', `${(stats.area_mm2 / 100).toFixed(1)} cm²`],
   ];
+  if (origVol) rows.push(['相对密度', `${((stats.volume_mm3 / origVol) * 100).toFixed(1)} %`]);
+  rows.push(['体素', `${Number(stats.voxel_pitch).toFixed(3)} mm`]);
+  rows.push(['引擎', extra.engine || '服务器']);
+  rows.push(['耗时', extra.seconds !== undefined ? `${extra.seconds} s` : `${(state.lastMs / 1000).toFixed(2)} s`]);
   $('#statsKv').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('#statsPanel').hidden = false;
+}
+
+/** 精度诊断：体素尺寸 vs 模型最小特征 / 晶格壁厚 */
+function renderPrecision(meta) {
+  const box = $('#precisionBox');
+  const features = meta?.features || null;
+  state.features = features;
+  const pitch = meta?.pitch;
+  if (!pitch) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+
+  const holeR = features?.min_hole_radius ?? null;
+  const holeRatio = holeR ? (holeR * 2) / pitch : null;      // 孔径 / 体素
+  const thickness = Math.min(+$('#thickRange').value, 0.8 * +$('#cellRange').value);
+  const wallRatio = thickness / pitch;                        // 壁厚 / 体素
+  const extent = Math.max(...(state.job?.info?.extents || [1]));
+
+  const rows = [];
+  rows.push(`<div class="row"><span>体素尺寸</span><b>${pitch.toFixed(3)} mm</b></div>`);
+  rows.push(`<div class="row"><span>网格</span><b>${(meta.shape || []).join(' × ')}</b></div>`);
+  if (holeR) {
+    rows.push(`<div class="row"><span>最小内孔半径</span><b>${holeR.toFixed(2)} mm</b></div>`);
+    rows.push(
+      `<div class="row"><span>孔径 / 体素</span><b class="${holeRatio >= 4 ? 'ok' : 'bad'}">${holeRatio.toFixed(1)}</b></div>`
+    );
+  }
+  rows.push(
+    `<div class="row"><span>壁厚 / 体素</span><b class="${wallRatio >= 3 ? 'ok' : 'bad'}">${wallRatio.toFixed(1)}</b></div>`
+  );
+
+  // 两条硬要求：小孔至少 4 个体素宽，壁厚至少 3 个体素
+  const warnings = [...(features?.warnings || [])];
+  if (wallRatio < 2.6) {
+    warnings.push(`壁厚 / 杆径 ${thickness.toFixed(2)} mm 只有 ${wallRatio.toFixed(1)} 个体素，晶格会断续或消失，建议分辨率 ≥ ${suggestResolution(extent, thickness / 3, pitch)}`);
+  }
+  if (holeRatio !== null && holeRatio < 4) {
+    warnings.push(`最小孔 ⌀${(holeR * 2).toFixed(2)} mm 只有 ${holeRatio.toFixed(1)} 个体素宽，等值面会明显失真`);
+  }
+  if (warnings.length) {
+    rows.push(`<div class="warnline">${warnings.map((w) => `⚠ ${w}`).join('<br>')}</div>`);
+  }
+  box.innerHTML = rows.join('');
+
+  // 自动分辨率：同时满足「小孔 ≥ 4 体素」「壁厚 ≥ 3 体素」
+  const need = Math.max(
+    holeR ? suggestResolution(extent, holeR / 2, pitch) : 0,
+    suggestResolution(extent, thickness / 3, pitch)
+  );
+  const btn = $('#btnAutoRes');
+  if (features?.recommended_resolution || need > 0) {
+    const rec = Math.max(features?.recommended_resolution || 0, need);
+    btn.hidden = false;
+    btn.dataset.target = String(clampResolution(rec));
+    btn.textContent = `按最小特征自动选分辨率（建议 ${btn.dataset.target}）`;
+  } else {
+    btn.hidden = true;
+  }
+}
+
+/** 目标体素尺寸 → 分辨率（按模型最长边） */
+function suggestResolution(extent, pitchNeeded, currentPitch) {
+  if (!(pitchNeeded > 0)) return 0;
+  const res = Math.ceil(extent / pitchNeeded);
+  return currentPitch && res <= 1 ? 0 : res;
+}
+
+function clampResolution(res) {
+  const maxGpu = state.engine ? estimateMaxResolution(state.engine) : 320;
+  const cap = state.engineMode === 'gpu' ? maxGpu : (state.serverMaxRes || 320);
+  return Math.max(48, Math.min(cap, Math.round(res / 8) * 8)); // 取 8 的整数倍，缓冲更整齐
+}
+
+function applyJob(job) {
+  state.job = job;
+  if (job.info) renderModelInfo(job);
+
+  const running = job.status === 'preparing' || job.status === 'running';
+  if (running) {
+    setBusy(true);
+    showProgress(job.progress || 0.05, job.stage || '处理中…');
+  } else {
+    hideProgress();
+  }
+
+  if (job.status === 'error') {
+    setBusy(false);
+    setStatus('出错', '');
+    toast(job.error || '处理失败');
+    return;
+  }
+
+  if (job.status === 'ready') {
+    setBusy(false);
+    setExportEnabled(!!state.mesh);
+    const voxel = job.info?.voxel;
+    setStatus(
+      `模型就绪 · ${job.filename}`,
+      voxel ? `体素 ${voxel.resolution} · ${voxel.pitch.toFixed(3)} mm` : ''
+    );
+  }
+
+  if (job.status === 'done') {
+    setBusy(false);
+    if (state.engineMode === 'server') {
+      renderStats(job.stats, { engine: '服务器', seconds: job.stats?.seconds });
+      setExportEnabled(true);
+      setStatus(`晶格已生成 · ${job.filename}`, `${job.stats?.seconds ?? '?'} s`);
+      if (job.version !== state.latticeVersion) {
+        state.latticeVersion = job.version;
+        loadPreview('lattice', job.version).then(() => {
+          if (state.view === 'original') setView('lattice');
+          else setView(state.view);
+        });
+      }
+    }
+  }
 }
 
 async function loadPreview(kind, version = 0) {
@@ -475,43 +686,6 @@ async function loadPreview(kind, version = 0) {
   } catch (err) {
     console.error(err);
     toast(`预览加载失败：${err.message || err}`);
-  }
-}
-
-function applyJob(job) {
-  state.job = job;
-  if (job.info) renderModelInfo(job);
-
-  const running = job.status === 'preparing' || job.status === 'running';
-  if (running) showProgress(job.progress || 0.05, job.stage || '处理中…');
-  else hideProgress();
-
-  if (job.status === 'error') {
-    setBusy(false);
-    setStatus('出错', '');
-    toast(job.error || '处理失败');
-    return;
-  }
-
-  if (job.status === 'ready') {
-    setBusy(false);
-    setExportEnabled(false);
-    setStatus(`模型就绪 · ${job.filename}`, job.info?.voxel
-      ? `体素 ${job.info.voxel.resolution} · ${job.info.voxel.pitch.toFixed(3)} mm` : '');
-  }
-
-  if (job.status === 'done') {
-    setBusy(false);
-    renderStats(job.stats);
-    setExportEnabled(true);
-    setStatus(`晶格已生成 · ${job.filename}`, `${job.stats?.seconds ?? '?'} s`);
-    if (job.version !== state.latticeVersion) {
-      state.latticeVersion = job.version;
-      loadPreview('lattice', job.version).then(() => {
-        if (state.view === 'original') setView('lattice');
-        else setView(state.view);
-      });
-    }
   }
 }
 
@@ -542,9 +716,12 @@ function resetResult() {
   groupOriginal.visible = true;
   groupLattice.visible = false;
   state.latticeVersion = -1;
+  state.mesh = null;
+  state.volume = null;
   setView('original');
   $('#statsPanel').hidden = true;
   $('#modelInfo').hidden = true;
+  $('#precisionBox').hidden = true;
   setExportEnabled(false);
 }
 
@@ -553,24 +730,108 @@ async function adoptJob(job) {
   await loadPreview('original');
   setView('original');
   pollJob(job.id);
+  if (state.engineMode === 'gpu') await prepareVolume();
 }
 
 /* =========================================================================
- * 建立模型：摆线轮盘 / 上传
+ * 体素场（GPU 路径的一次性输入）
  * ====================================================================== */
-async function buildCycloid() {
-  resetResult();
-  setBusy(true);
-  showProgress(0.05, '生成摆线轮盘…');
-  setStatus('正在由参数生成轮盘…', '');
+async function prepareVolume() {
+  if (!state.job || !state.engine) return null;
+  const resolution = +$('#resSel').value;
+  if (state.volume && state.volume.jobId === state.job.id && state.volume.resolution === resolution) {
+    return state.volume;
+  }
+
+  showProgress(0.1, `服务端体素化（${resolution}³）…`);
+  setStatus('准备体素场…', '');
+  await nextFrame();
   try {
-    const job = await fetchJSON(`${API}/jobs/from-cycloid`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(collectCycloid()),
-    });
-    await adoptJob(job);
+    const res = await fetch(`${API}/jobs/${state.job.id}/volume?resolution=${resolution}`);
+    if (!res.ok) {
+      let detail = `体素场获取失败（${res.status}）`;
+      try {
+        const j = await res.json();
+        if (j.detail) detail = j.detail;
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const raw = res.headers.get('X-Volume-Meta');
+    const meta = JSON.parse(raw || '{}');
+    const buffer = await res.arrayBuffer();
+    if (!meta.shape) throw new Error('体素场元数据缺失');
+
+    const grid = state.engine.setSolid(meta, buffer);
+    state.volume = { meta, jobId: state.job.id, resolution, features: meta.features || null, grid };
+    renderPrecision(meta);
+    hideProgress();
+    const mb = (meta.bytes / 1048576).toFixed(1);
+    setStatus(`模型就绪 · ${state.job.filename}`, `体素 ${grid.nx}×${grid.ny}×${grid.nz} · ${meta.pitch.toFixed(3)} mm · ${mb} MB`);
+    return state.volume;
   } catch (err) {
+    hideProgress();
+    toast(err.message || String(err));
+    setStatus('体素化失败', '');
+    return null;
+  }
+}
+
+/* =========================================================================
+ * 生成
+ * ====================================================================== */
+async function generate() {
+  if (!state.job || state.busy) return;
+  if (state.engineMode === 'gpu' && state.engine) await generateGpu();
+  else await generateServer();
+}
+
+function buildLatticeGeometry(mesh) {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+  geom.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
+  geom.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
+  geom.computeBoundingSphere();
+  return geom;
+}
+
+async function generateGpu() {
+  const volume = await prepareVolume();
+  if (!volume) return;
+
+  setBusy(true);
+  showProgress(0.45, 'GPU 生成晶格…');
+  setStatus('GPU 生成中…', '');
+  await nextFrame();
+
+  const params = collectParams();
+  const t0 = performance.now();
+  try {
+    const mesh = await state.engine.generate(params);
+    state.lastMs = performance.now() - t0;
+    state.mesh = mesh;
+
+    clearGroup(groupLattice);
+    const holder = new THREE.Group();
+    holder.rotation.x = -Math.PI / 2;   // Z-up → Y-up
+    const m = new THREE.Mesh(buildLatticeGeometry(mesh), matLattice);
+    m.frustumCulled = false;
+    holder.add(m);
+    groupLattice.add(holder);
+    matLattice.wireframe = state.wireframe;
+
+    renderStats(mesh.stats, { engine: `浏览器 GPU · ${state.engine.adapterLabel}` });
+    setExportEnabled(true);
+    hideProgress();
+    setBusy(false);
+    setStatus(
+      `晶格已生成 · ${params.lattice}`,
+      `${mesh.stats.faces.toLocaleString()} 面 · ${(state.lastMs / 1000).toFixed(2)} s`
+    );
+    if (state.view === 'original') setView('lattice');
+    else setView(state.view);
+    if (groupLattice.children.length === 1) frameAll(false);
+  } catch (err) {
+    console.error(err);
     hideProgress();
     setBusy(false);
     setStatus('生成失败', '');
@@ -578,6 +839,70 @@ async function buildCycloid() {
   }
 }
 
+async function generateServer() {
+  setBusy(true);
+  showProgress(0.02, '提交参数…');
+  setStatus('生成中…', '');
+  state.mesh = null;
+  try {
+    await fetchJSON(`${API}/jobs/${state.job.id}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...collectParams(), decimate: +$('#decRange').value }),
+    });
+    pollJob(state.job.id);
+  } catch (err) {
+    setBusy(false);
+    hideProgress();
+    toast(err.message || String(err));
+  }
+}
+
+/* =========================================================================
+ * 导出
+ * ====================================================================== */
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function exportFilename(fmt) {
+  const stem = (state.job?.filename || 'lattice').replace(/\.[^.]+$/, '') || 'lattice';
+  return `${stem}_lattice.${fmt}`;
+}
+
+async function exportAs(fmt) {
+  if (state.mesh) {
+    setStatus(`正在导出 ${fmt.toUpperCase()}…`, '');
+    await nextFrame();
+    try {
+      const blob = exportMesh(fmt, state.mesh, exportFilename(fmt));
+      downloadBlob(blob, exportFilename(fmt));
+      toast(`已导出 ${fmt.toUpperCase()}（${(blob.size / 1048576).toFixed(1)} MB）`, true);
+      setStatus('导出完成', `${(blob.size / 1048576).toFixed(1)} MB`);
+    } catch (err) {
+      toast(`导出失败：${err.message || err}`);
+    }
+    return;
+  }
+  if (!state.job || state.latticeVersion < 0) {
+    toast('请先生成晶格模型');
+    return;
+  }
+  setStatus(`正在导出 ${fmt.toUpperCase()}…`, '');
+  window.location.href = `${API}/jobs/${state.job.id}/download/${fmt}`;
+  setTimeout(() => setStatus('导出已开始', ''), 1200);
+}
+
+/* =========================================================================
+ * 建立模型：上传 / 样例 / 摆线轮盘
+ * ====================================================================== */
 function uploadWithProgress(file) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -634,36 +959,24 @@ async function loadSample(name) {
   }
 }
 
-/* =========================================================================
- * 生成 / 导出
- * ====================================================================== */
-async function generate() {
-  if (!state.job || state.busy) return;
+async function buildCycloid() {
+  resetResult();
   setBusy(true);
-  showProgress(0.02, '提交参数…');
-  setStatus('生成中…', '');
+  showProgress(0.05, '生成摆线轮盘…');
+  setStatus('正在由参数生成轮盘…', '');
   try {
-    await fetchJSON(`${API}/jobs/${state.job.id}/generate`, {
+    const job = await fetchJSON(`${API}/jobs/from-cycloid`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(collectParams()),
+      body: JSON.stringify(collectCycloid()),
     });
-    pollJob(state.job.id);
+    await adoptJob(job);
   } catch (err) {
-    setBusy(false);
     hideProgress();
+    setBusy(false);
+    setStatus('生成失败', '');
     toast(err.message || String(err));
   }
-}
-
-function downloadAs(fmt) {
-  if (!state.job || state.latticeVersion < 0) {
-    toast('请先生成晶格模型');
-    return;
-  }
-  setStatus(`正在导出 ${fmt.toUpperCase()}…`, '');
-  window.location.href = `${API}/jobs/${state.job.id}/download/${fmt}`;
-  setTimeout(() => setStatus('导出已开始', ''), 1200);
 }
 
 /* =========================================================================
@@ -701,126 +1014,199 @@ function applySharedCycloid() {
 
   const note = $('#cycloidFromUrl');
   note.hidden = false;
-  note.textContent = `已带入摆线设计器参数（Zc=${$('#czc').value}）。`;
-  syncOutputs();
+  note.textContent = `已带入摆线设计器参数（Zc=${$('#czc').value}、e=${$('#ce').value}、Rz=${$('#crz').value}、rp=${$('#crp').value}），点上面的按钮即可生成轮盘。`;
+  syncCycloidOutputs();
   return true;
 }
 
 /* =========================================================================
  * 事件绑定
  * ====================================================================== */
-function switchSource(source) {
-  state.source = source;
-  $$('#sourceSeg button').forEach((b) => b.classList.toggle('active', b.dataset.source === source));
-  $('#cycloidSource').hidden = source !== 'cycloid';
-  $('#uploadSource').hidden = source !== 'upload';
-}
-
-function bindUI() {
-  $$('#sourceSeg button').forEach((btn) =>
-    btn.addEventListener('click', () => switchSource(btn.dataset.source))
-  );
-
-  // --- 摆线轮参数 ---
-  for (const id of ['#czc', '#ce', '#crz', '#crp', '#cwidth']) {
-    $(id).addEventListener('input', syncOutputs);
-  }
-  $('#btnBuildCycloid').addEventListener('click', buildCycloid);
-
-  // --- 上传 ---
+function bindEvents() {
+  // —— 上传 ——
   const dropzone = $('#dropzone');
   const fileInput = $('#fileInput');
   dropzone.addEventListener('click', () => fileInput.click());
-  dropzone.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  dropzone.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); fileInput.click(); }
   });
   fileInput.addEventListener('change', () => {
-    handleFile(fileInput.files?.[0]);
+    if (fileInput.files?.[0]) handleFile(fileInput.files[0]);
     fileInput.value = '';
   });
-  ['dragenter', 'dragover'].forEach((type) =>
-    dropzone.addEventListener(type, (e) => { e.preventDefault(); dropzone.classList.add('dragover'); })
-  );
-  ['dragleave', 'drop'].forEach((type) =>
-    dropzone.addEventListener(type, (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); })
-  );
-  dropzone.addEventListener('drop', (e) => handleFile(e.dataTransfer?.files?.[0]));
-  window.addEventListener('dragover', (e) => e.preventDefault());
-  window.addEventListener('drop', (e) => e.preventDefault());
+  for (const type of ['dragenter', 'dragover']) {
+    dropzone.addEventListener(type, (ev) => {
+      ev.preventDefault();
+      dropzone.classList.add('dragover');
+    });
+  }
+  for (const type of ['dragleave', 'drop']) {
+    dropzone.addEventListener(type, (ev) => {
+      ev.preventDefault();
+      dropzone.classList.remove('dragover');
+    });
+  }
+  dropzone.addEventListener('drop', (ev) => {
+    const file = ev.dataTransfer?.files?.[0];
+    if (file) handleFile(file);
+  });
+  window.addEventListener('dragover', (ev) => ev.preventDefault());
+  window.addEventListener('drop', (ev) => ev.preventDefault());
 
-  $$('[data-sample]').forEach((btn) =>
-    btn.addEventListener('click', () => loadSample(btn.dataset.sample))
-  );
+  for (const btn of $$('[data-sample]')) {
+    btn.addEventListener('click', () => loadSample(btn.dataset.sample));
+  }
 
-  $('#clearBtn').addEventListener('click', () => {
-    if (state.job) fetchJSON(`${API}/jobs/${state.job.id}`, { method: 'DELETE' }).catch(() => {});
-    state.job = null;
-    resetResult();
-    setBusy(false);
-    $('#btnGenerate').disabled = true;
-    setStatus('等待模型…', '');
+  // —— 摆线轮盘对话框 ——
+  const dlg = $('#cycloidDialog');
+  $('#btnCycloid').addEventListener('click', () => {
+    syncCycloidOutputs();
+    dlg.showModal();
+  });
+  for (const sel of ['#czc', '#ce', '#crz', '#crp', '#cwidth']) {
+    $(sel).addEventListener('input', syncCycloidOutputs);
+  }
+  $('#btnBuildCycloid').addEventListener('click', (ev) => {
+    ev.preventDefault();
+    dlg.close();
+    buildCycloid();
   });
 
-  // --- 晶格参数 ---
-  const paramIds = [
-    'latticeSel', 'cellRange', 'thickRange', 'modeSel', 'shellRange',
-    'resSel', 'warpRange', 'gradRange', 'smoothRange', 'decRange', 'wallSel', 'skinChk',
-  ];
-  for (const id of paramIds) {
-    $(`#${id}`).addEventListener('input', () => {
-      if (id === 'latticeSel') syncLatticeUI();
-      if (id === 'cellRange') clampThickness();
+  // —— 参数表单 ——
+  $('#latticeSel').addEventListener('change', () => {
+    syncLatticeLabels();
+    syncDensity();
+    if (state.mesh) schedulePreview();
+  });
+  $('#modeSel').addEventListener('change', () => {
+    syncModeHint();
+    if (state.mesh) schedulePreview();
+  });
+  for (const sel of ['#cellRange', '#thickRange', '#shellRange', '#warpRange', '#gradRange']) {
+    $(sel).addEventListener('input', () => {
+      if (sel === '#cellRange') clampThickness();
       syncOutputs();
+      syncDensity();
+      // 壁厚变了，「壁厚 / 体素」的精度提示也要跟着变
+      if (sel === '#thickRange' || sel === '#cellRange') {
+        if (state.volume?.meta) renderPrecision(state.volume.meta);
+      }
+      if (state.mesh) schedulePreview();
+    });
+  }
+  $('#wallSel').addEventListener('change', () => state.mesh && schedulePreview());
+  $('#skinChk').addEventListener('change', () => state.mesh && schedulePreview());
+  $('#smoothRange').addEventListener('input', syncOutputs);
+  $('#decRange').addEventListener('input', syncOutputs);
+
+  // —— 引擎切换 ——
+  for (const btn of $$('#engineSeg button')) {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      setEngine(btn.dataset.engine);
+      if (state.engineMode === 'gpu') {
+        await prepareVolume();
+        if (state.mesh) generate();
+      } else {
+        toast('已切到服务器生成：会用服务端的 marching cubes + 抽稀');
+      }
     });
   }
 
-  $('#btnGenerate').addEventListener('click', generate);
-  $('#btnStl').addEventListener('click', () => downloadAs('stl'));
-  $('#btn3mf').addEventListener('click', () => downloadAs('3mf'));
-  $('#btnObj').addEventListener('click', () => downloadAs('obj'));
-  $('#btnPly').addEventListener('click', () => downloadAs('ply'));
+  // —— 分辨率 ——
+  $('#resSel').addEventListener('change', async () => {
+    syncOutputs();
+    if (!state.job) return;
+    if (state.engineMode === 'gpu') {
+      await prepareVolume();
+      if (state.mesh) generate();
+    } else {
+      setStatus('分辨率已改变，点「生成晶格」生效', '');
+    }
+  });
+  $('#btnAutoRes').addEventListener('click', async () => {
+    const features = state.features || state.volume?.features;
+    let target = Number($('#btnAutoRes').dataset.target || 0);
+    if (!target) {
+      const holeR = features?.min_hole_radius;
+      if (!holeR) return toast('还没有体素场信息，先生成一次模型');
+      const extent = Math.max(...(state.job?.info?.extents || [100]));
+      target = extent / (holeR / 2);
+    }
+    target = clampResolution(target);
+    const sel = $('#resSel');
+    const exists = Array.from(sel.options).some((o) => Number(o.value) === target);
+    if (!exists) {
+      const opt = document.createElement('option');
+      opt.value = String(target);
+      opt.textContent = `${target}（按特征推荐）`;
+      sel.appendChild(opt);
+    }
+    sel.value = String(target);
+    syncOutputs();
+    if (state.engineMode === 'gpu') await prepareVolume();
+    toast(`分辨率已设为 ${target}`, true);
+  });
 
-  // --- 视图 ---
-  $$('#viewSeg button').forEach((btn) =>
-    btn.addEventListener('click', () => setView(btn.dataset.view))
-  );
-  $('#wireBtn').addEventListener('click', () => {
+  // —— 生成 / 导出 ——
+  $('#btnGenerate').addEventListener('click', generate);
+  $('#btnStl').addEventListener('click', () => exportAs('stl'));
+  $('#btn3mf').addEventListener('click', () => exportAs('3mf'));
+  $('#btnObj').addEventListener('click', () => exportAs('obj'));
+  $('#btnPly').addEventListener('click', () => exportAs('ply'));
+
+  // —— 视图 ——
+  for (const btn of $$('#viewSeg button')) {
+    btn.addEventListener('click', () => setView(btn.dataset.view));
+  }
+  $('#wireBtn').addEventListener('click', (ev) => {
     state.wireframe = !state.wireframe;
     matLattice.wireframe = state.wireframe;
-    $('#wireBtn').classList.toggle('active', state.wireframe);
+    ev.currentTarget.classList.toggle('on', state.wireframe);
   });
-  $('#rotateBtn').addEventListener('click', () => {
+  $('#rotateBtn').addEventListener('click', (ev) => {
     state.autoRotate = !state.autoRotate;
-    $('#rotateBtn').classList.toggle('active', state.autoRotate);
+    ev.currentTarget.classList.toggle('on', state.autoRotate);
   });
-  $('#resetBtn').addEventListener('click', () => frameAll(true));
-
-  // 快捷键：G 生成、F 适配、W 线框
-  window.addEventListener('keydown', (e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-    if (e.key === 'g' || e.key === 'G') generate();
-    else if (e.key === 'f' || e.key === 'F') frameAll(true);
-    else if (e.key === 'w' || e.key === 'W') $('#wireBtn').click();
+  $('#resetBtn').addEventListener('click', () => frameAll());
+  $('#clearBtn').addEventListener('click', () => {
+    if (state.job) fetchJSON(`${API}/jobs/${state.job.id}`, { method: 'DELETE' }).catch(() => {});
+    state.job = null;
+    state.mesh = null;
+    state.volume = null;
+    resetResult();
+    setBusy(false);
+    setStatus('等待模型…', '');
   });
 }
 
+/** 参数变化后的自动重算（GPU 很快，直接重算；服务端模式要手动点） */
+let previewTimer = null;
+function schedulePreview() {
+  if (state.engineMode !== 'gpu' || !state.engine) return;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => generate(), 120);
+}
+
 /* =========================================================================
- * 启动
+ * 初始化
  * ====================================================================== */
-async function boot() {
+async function init() {
   resize();
+  bindEvents();
   animate();
-  bindUI();
-  switchSource('cycloid');
+
   try {
     state.config = await fetchJSON(`${API}/config`);
     populateConfig(state.config);
   } catch (err) {
-    toast(`配置加载失败：${err.message}`);
+    toast(`配置加载失败：${err.message || err}`);
   }
-  const shared = applySharedCycloid();
-  setStatus('等待模型…', shared ? '已带入摆线参数，可直接生成轮盘' : 'G 生成 · F 适配视图');
-  if (shared) buildCycloid();
+
+  await probeEngine();
+  applyResourceLimits(state.config);
+  syncOutputs();
+  applySharedCycloid();
 }
 
-boot();
+init();

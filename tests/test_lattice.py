@@ -233,15 +233,22 @@ def test_lattice_health_and_config() -> None:
 
 
 def test_pages_are_served() -> None:
-    """两个工具的页面都能打开。"""
-    cycloid = client.get("/")
+    """首页 + 两个独立工具页都能打开（两个工具各自一套静态资源）。"""
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "CAD 工具箱" in home.text
+
+    cycloid = client.get("/cycloid")
     assert cycloid.status_code == 200
     assert "摆线针轮" in cycloid.text
+    assert "/static/cycloid/app.js" in cycloid.text
 
     lattice = client.get("/lattice")
     assert lattice.status_code == 200
     assert "晶格化" in lattice.text
     assert "/static/lattice/app.js" in lattice.text
+    # GPU 引擎与着色器是这个页面的核心依赖
+    assert "/static/lattice/style.css" in lattice.text
 
 
 def test_lattice_api_flow() -> None:

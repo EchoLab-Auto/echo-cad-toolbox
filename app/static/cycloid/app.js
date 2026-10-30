@@ -18,6 +18,41 @@ const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
 /* ---------------------------------------------------------------------------
+ * 分析引擎：默认在**浏览器本地**算派生量（零网络往返），
+ * 只有 analysis.js 加载失败时才回退到服务器 POST /api/analyze。
+ * ------------------------------------------------------------------------ */
+
+let localAnalyze = null;
+let localAnalyzeFailed = null;
+let dataVersion = 0;
+
+/** 动态加载本地分析模块；失败不抛错，交给回退路径处理 */
+const analysisReady = import('./analysis.js')
+  .then((mod) => {
+    localAnalyze = typeof mod.analyze === 'function' ? mod.analyze : null;
+  })
+  .catch((err) => {
+    localAnalyzeFailed = err;
+    console.warn('[cycloid] 本地分析模块不可用，回退到 /api/analyze：', err);
+  });
+
+/** 统一调用本地分析（同步），兼容 contactSteps / contact_steps 两种选项名 */
+function analyzeLocalSync(params) {
+  const out = localAnalyze(params, { contactSteps: 0, contact_steps: 0, steps: 0 });
+  if (out && typeof out.then === 'function') throw new Error('analysis.js 必须同步返回');
+  return out;
+}
+
+/** 顶栏计算引擎角标 */
+function setEngineChip(mode, text) {
+  const chip = $('#perfChip');
+  if (!chip) return;
+  chip.classList.toggle('busy', mode === 'busy');
+  const label = chip.lastElementChild;
+  if (label && text) label.textContent = text;
+}
+
+/* ---------------------------------------------------------------------------
  * 参数 schema（顺序即 UI 顺序）
  * ------------------------------------------------------------------------ */
 
@@ -188,27 +223,43 @@ async function postJson(path, body) {
 
 function scheduleAnalyze(immediate = false) {
   clearTimeout(analyzeTimer);
-  analyzeTimer = setTimeout(analyze, immediate ? 0 : 70);
+  // 本地计算是同步的毫秒级操作，只需合并同一帧内的连续输入
+  analyzeTimer = setTimeout(analyze, immediate ? 0 : 16);
 }
 
 async function analyze() {
   const seq = ++analyzeSeq;
   state.busy = true;
+  setEngineChip('busy', '计算中');
   try {
-    const res = await postJson('/api/analyze', { params: state.params, contact_steps: 0 });
-    const data = await res.json();
-    if (seq !== analyzeSeq) return; // 丢弃过期响应
+    if (!localAnalyze && !localAnalyzeFailed) await analysisReady;
+
+    let data;
+    let ms = 0;
+    if (localAnalyze) {
+      const t0 = performance.now();
+      data = analyzeLocalSync(state.params);
+      ms = performance.now() - t0;
+    } else {
+      const res = await postJson('/api/analyze', { params: state.params, contact_steps: 0 });
+      data = await res.json();
+    }
+
+    if (seq !== analyzeSeq) return; // 丢弃过期结果
     state.data = data;
     state.error = null;
+    dataVersion += 1;               // 让渲染用的 Path2D 缓存失效
     renderMetrics();
     updateUrl();
     if (!state.view.fitted) fitView();
     else draw();
+    setEngineChip('ok', localAnalyze ? `本地 ${ms < 10 ? ms.toFixed(1) : ms.toFixed(0)} ms` : '服务器计算');
   } catch (err) {
     if (seq !== analyzeSeq) return;
     state.error = String(err.message || err);
     renderMetrics();
     toast('计算失败：' + state.error, true);
+    setEngineChip('err', '计算失败');
   } finally {
     state.busy = false;
     draw();
@@ -436,73 +487,45 @@ function draw() {
   }
 
   // ---- 摆线轮（含孔，evenodd 镂空）----
+  // Path2D 缓存（世界坐标，与视图缩放无关）：齿廓有几千个点，每帧重建≈1~2 ms，
+  // 动画期间复用可以省掉这部分开销。
+  const paths = discPaths(d);
+
   ctx.save();
   ctx.translate(pose.cx, pose.cy);
   ctx.rotate(pose.theta);
 
-  ctx.beginPath();
-  addDiscPath(d.profile.actual);
-  if (d.output.center_bore_radius > 0) {
-    ctx.moveTo(d.output.center_bore_radius, 0);
-    ctx.arc(0, 0, d.output.center_bore_radius, 0, TAU, true);
-  }
-  if (state.show.holes) {
-    for (const [hx, hy] of d.output.hole_centers) {
-      ctx.moveTo(hx + d.output.hole_radius, hy);
-      ctx.arc(hx, hy, d.output.hole_radius, 0, TAU, true);
-    }
-  }
   const grad = ctx.createRadialGradient(0, 0, d.derived.root_radius * 0.2, 0, 0, d.derived.tip_radius);
   grad.addColorStop(0, 'rgba(46,160,67,0.20)');
   grad.addColorStop(1, 'rgba(63,185,80,0.08)');
   ctx.fillStyle = grad;
-  ctx.fill('evenodd');
+  ctx.fill(paths.fill, 'evenodd');
 
   ctx.strokeStyle = '#3fb950';
   ctx.lineWidth = strokeWidth(1.8);
-  ctx.beginPath();
-  addDiscPath(d.profile.actual);
-  ctx.stroke();
+  ctx.stroke(paths.disc);
 
   // 理论齿廓
   if (state.show.theory) {
     ctx.setLineDash([strokeWidth(6), strokeWidth(5)]);
     ctx.strokeStyle = 'rgba(139,148,158,0.65)';
     ctx.lineWidth = strokeWidth(1);
-    ctx.beginPath();
-    addDiscPath(d.profile.theoretical, false);
-    ctx.stroke();
+    ctx.stroke(paths.theory);
     ctx.setLineDash([]);
   }
 
   // 中心孔与柱销孔轮廓
   ctx.strokeStyle = 'rgba(210,153,34,0.85)';
   ctx.lineWidth = strokeWidth(1.3);
-  ctx.beginPath();
-  if (d.output.center_bore_radius > 0) {
-    ctx.moveTo(d.output.center_bore_radius, 0);
-    ctx.arc(0, 0, d.output.center_bore_radius, 0, TAU);
-  }
-  if (state.show.holes) {
-    for (const [hx, hy] of d.output.hole_centers) {
-      ctx.moveTo(hx + d.output.hole_radius, hy);
-      ctx.arc(hx, hy, d.output.hole_radius, 0, TAU);
-    }
-  }
-  ctx.stroke();
+  ctx.stroke(paths.holes);
 
   // 柱销（与孔同心，半径 rw —— 展示偏心摆动机构的原理）
   if (state.show.sleeves) {
     ctx.fillStyle = 'rgba(210,153,34,0.30)';
     ctx.strokeStyle = 'rgba(210,153,34,0.95)';
     ctx.lineWidth = strokeWidth(1.2);
-    ctx.beginPath();
-    for (const [hx, hy] of d.output.hole_centers) {
-      ctx.moveTo(hx + d.output.sleeve_radius, hy);
-      ctx.arc(hx, hy, d.output.sleeve_radius, 0, TAU);
-    }
-    ctx.fill();
-    ctx.stroke();
+    ctx.fill(paths.sleeves);
+    ctx.stroke(paths.sleeves);
   }
 
   ctx.restore();
@@ -545,6 +568,76 @@ function draw() {
   updateHud(gd, pose);
 }
 
+/** 世界坐标下的 Path2D 缓存（dataVersion / 显示开关变化时失效） */
+const pathCache = { key: '', disc: null, theory: null, fill: null, holes: null, sleeves: null };
+
+function buildPath(pts) {
+  const p = new Path2D();
+  if (!pts || !pts.length) return p;
+  p.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i][0], pts[i][1]);
+  p.closePath();
+  return p;
+}
+
+/** 轮盘 + 中心孔 + 柱销孔（evenodd 填充用；孔的方向无所谓） */
+function buildDiscFillPath(d) {
+  const p = new Path2D();
+  p.addPath(buildPath(d.profile.actual));
+  const bore = d.output.center_bore_radius;
+  if (bore > 0) {
+    p.moveTo(bore, 0);
+    p.arc(0, 0, bore, 0, TAU, true);
+  }
+  if (state.show.holes) {
+    for (const [hx, hy] of d.output.hole_centers) {
+      p.moveTo(hx + d.output.hole_radius, hy);
+      p.arc(hx, hy, d.output.hole_radius, 0, TAU, true);
+    }
+  }
+  return p;
+}
+
+/** 中心孔 + 柱销孔的轮廓线 */
+function buildHolePath(d) {
+  const p = new Path2D();
+  const bore = d.output.center_bore_radius;
+  if (bore > 0) {
+    p.moveTo(bore, 0);
+    p.arc(0, 0, bore, 0, TAU);
+  }
+  if (state.show.holes) {
+    for (const [hx, hy] of d.output.hole_centers) {
+      p.moveTo(hx + d.output.hole_radius, hy);
+      p.arc(hx, hy, d.output.hole_radius, 0, TAU);
+    }
+  }
+  return p;
+}
+
+/** 柱销套（与孔同心） */
+function buildSleevePath(d) {
+  const p = new Path2D();
+  for (const [hx, hy] of d.output.hole_centers) {
+    p.moveTo(hx + d.output.sleeve_radius, hy);
+    p.arc(hx, hy, d.output.sleeve_radius, 0, TAU);
+  }
+  return p;
+}
+
+function discPaths(d) {
+  const key = `${dataVersion}|${state.show.holes ? 1 : 0}`;
+  if (pathCache.key !== key) {
+    pathCache.key = key;
+    pathCache.disc = buildPath(d.profile.actual);
+    pathCache.theory = buildPath(d.profile.theoretical);
+    pathCache.fill = buildDiscFillPath(d);
+    pathCache.holes = buildHolePath(d);
+    pathCache.sleeves = buildSleevePath(d);
+  }
+  return pathCache;
+}
+
 function addDiscPath(pts, moveFirst = true) {
   if (!pts || !pts.length) return;
   if (moveFirst) ctx.moveTo(pts[0][0], pts[0][1]);
@@ -581,6 +674,8 @@ function drawScaleBar() {
   ctx.fillText(`${step} mm`, x0, y0 - 8);
 }
 
+let lastHudHtml = '';
+
 function updateHud(g, pose) {
   const hud = $('#hud');
   const ratio = g.Zc;
@@ -588,11 +683,16 @@ function updateHud(g, pose) {
   const outDeg = (-state.anim.phi / g.Zc) * 180 / Math.PI;
   const d = state.data?.derived;
   const warnCount = (state.data?.warnings || []).filter((w) => w.level !== 'info').length;
-  hud.innerHTML = `
+  const html = `
     <div>Zc=<b>${g.Zc}</b> &nbsp; Zp=<b>${g.Zp}</b> &nbsp; K1=<b>${fmt(d?.short_amplitude_coefficient ?? 0, 3)}</b></div>
     <div>φ=<b>${fmt(phiDeg, 1)}°</b> &nbsp; 输出=<b>${fmt(outDeg, 2)}°</b> &nbsp; i=<b>${ratio}:1</b></div>
     <div>${state.view.scale.toFixed(2)} px/mm &nbsp; ${warnCount ? `<span class="bad">■ ${warnCount} 项告警</span>` : '<span class="ok">■ 几何有效</span>'}</div>
   `;
+  // 动画期间每帧写 innerHTML 会触发重排；内容没变就跳过
+  if (html !== lastHudHtml) {
+    hud.innerHTML = html;
+    lastHudHtml = html;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1096,18 +1196,12 @@ async function init() {
   bindEvents();
   resize();
 
-  // 导出对象选择器（动态插入到顶栏导出按钮之前）
-  const sel = document.createElement('select');
-  sel.id = 'exportPart';
-  sel.title = '选择导出内容';
-  sel.innerHTML = `
-    <option value="cycloid_disc">摆线轮</option>
-    <option value="pin_ring">针齿壳</option>
-    <option value="output_disc">输出盘</option>
-    <option value="assembly">装配图</option>
-    <option value="all_separate">全部（分件）</option>`;
-  sel.addEventListener('change', () => (state.exportPart = sel.value));
-  $('.export-group').prepend(sel);
+  // 导出对象选择器由 HTML 静态提供（顶栏「导出」下拉）
+  const partSel = $('#exportPart');
+  if (partSel) {
+    state.exportPart = partSel.value;
+    partSel.addEventListener('change', (ev) => (state.exportPart = ev.target.value));
+  }
 
   $('#speedVal').textContent = `${state.anim.speed.toFixed(2)}×`;
   syncPhiUI();

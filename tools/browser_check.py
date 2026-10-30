@@ -1,7 +1,7 @@
 """浏览器端验证：真实 Chromium 渲染 + JS 错误捕获 + 像素统计。
 
 用途：在没有人工查看的情况下确认前端确实渲染出内容、交互不报错。
-运行：python3 tools/browser_check.py [url]
+运行：python3 tools/browser_check.py [url]（默认摆线针轮设计器 /cycloid）
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8099/"
+URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8099/cycloid"
 
 PIXEL_PROBE = """
 () => {
