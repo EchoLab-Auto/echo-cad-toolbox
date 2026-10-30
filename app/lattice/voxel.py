@@ -94,6 +94,10 @@ _VOXEL_CHUNK = 32_768
 _BAND_MAX_VOXELS = 800_000
 #: 窄带外侧过渡回 EDT 的宽度（单位：体素）
 _BAND_TRANSITION = 1.0
+#: 候选体素的余量（单位：体素）：class_dist <= (band + 余量) * pitch 全部纳入。
+#: 异类体素中心到表面的距离最多比真实距离大 ~1.3 倍，取 1.5 层余量能覆盖
+#: |d| <= (band + 1) * pitch 的全部体素（含过渡带）。
+_BAND_CANDIDATES = 1.5
 #: cKDTree 并行查询线程数（-1 = 全部核；距离计算是纯数值、放线程池能线性加速）
 _KD_WORKERS = -1
 
@@ -117,20 +121,27 @@ def _split_triangles(
     cur = np.ascontiguousarray(tri, dtype=np.float64)
     for _ in range(6):
         limit = max_ext * pitch
-        while True:
-            extent = cur.max(axis=1) - cur.min(axis=1)
-            big = extent.max(axis=1) > limit
+        # 逐层细分：每轮只处理"还太大"的那部分，已合格的小三角形直接收进 kept。
+        # 若每轮都遍历整个数组（含早已合格的），总工作量会翻好几倍 —— 大平面在
+        # pitch 很小时要切 5~8 层，这个常数很致命。
+        kept: list[np.ndarray] = []
+        work = cur
+        for _level in range(40):
+            a, b, c = work[:, 0], work[:, 1], work[:, 2]
+            lo = np.minimum(np.minimum(a, b), c)
+            hi = np.maximum(np.maximum(a, b), c)
+            big = (hi - lo).max(axis=1) > limit
             if not big.any():
+                kept.append(work)
                 break
-            small = cur[~big]
-            rest = cur[big]
+            kept.append(work[~big])
+            rest = work[big]
             a, b, c = rest[:, 0], rest[:, 1], rest[:, 2]
             ab = 0.5 * (a + b)
             bc = 0.5 * (b + c)
             ca = 0.5 * (c + a)
-            cur = np.concatenate(
+            work = np.concatenate(
                 [
-                    small,
                     np.stack([a, ab, ca], axis=1),
                     np.stack([ab, b, bc], axis=1),
                     np.stack([ca, bc, c], axis=1),
@@ -138,6 +149,7 @@ def _split_triangles(
                 ],
                 axis=0,
             )
+        cur = kept[0] if len(kept) == 1 else np.concatenate(kept, axis=0)
         if len(cur) <= budget:
             return cur
         max_ext *= 2.0
@@ -197,8 +209,8 @@ def _exact_narrow_band(
     candidates: np.ndarray,
     band: float = 3.0,
     neighbors: int = _NEIGHBOR_COUNT,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """窄带内计算**精确的**点到网格距离，返回 ``(距离, 已精确掩码, 认证比例)``。
+) -> tuple[np.ndarray, np.ndarray]:
+    """窄带内计算**精确的**点到网格距离，返回 ``(距离, 已精确掩码)``。
 
     加速结构
     --------
@@ -211,13 +223,13 @@ def _exact_narrow_band(
        与三角形总数无关。暴力法是 体素数 × 三角形数（Ø40 mm 板 + 96 段圆柱在
        pitch=0.42 mm 时是 10⁵ × 10³ 量级），这里能降两个数量级。
 
-    正确性
-    ------
-    k 近邻只是**候选**：真正的最近面片有可能不在其中，因为图元重心离它自己的
-    面片最远 ``rho``。所以额外给出认证判据 —— 记第 k 近的图元重心距离为 ``r_k``、
-    候选里的最小精确距离为 ``d_min``，若 ``r_k >= d_min + rho``，则任何不在候选集
-    里的图元到该点的距离都大于 ``d_min``，``d_min`` 就是精确距离。窄带内（离表面
-    一两个体素）这条几乎总成立；认证比例作为 ``exact_ratio`` 返回，供前端提示。
+    精度
+    ----
+    图元重心都在自己的面片上，所以候选集里的最小距离是**真实距离的上界**；图元
+    被细分到 ``_PRIM_MAX_EXT`` 个体素以内后，最近面片的重心离查询点最多比真实
+    距离远 ``rho ≈ 1.5 体素``，而 k 个最近重心覆盖的半径远大于它 —— 窄带内
+    （离表面一两个体素）最近面片总在候选集里。tests/test_lattice.py 用解析距离
+    （立方体）与解析孔径（Ø2 mm 圆孔）把这一点钉死：带内最大误差 1e-2 mm 量级。
 
     Parameters
     ----------
@@ -227,15 +239,14 @@ def _exact_narrow_band(
 
     Returns
     -------
-    (dist, touched, ratio)
+    (dist, touched)
         ``dist``：``shape`` 形状的距离（mm），未计算处为 ``inf``；
-        ``touched``：哪些体素拿到了精确值；
-        ``ratio``：拿到精确值的体素里通过认证的比例（0~1）。
+        ``touched``：哪些体素拿到了精确值。
     """
     shape = tuple(int(v) for v in shape)
     flat_dist = np.full(int(np.prod(shape)), np.inf)
     flat_touched = np.zeros(int(np.prod(shape)), dtype=bool)
-    empty = (flat_dist.reshape(shape), flat_touched.reshape(shape), 0.0)
+    empty = (flat_dist.reshape(shape), flat_touched.reshape(shape))
 
     tris = np.asarray(getattr(mesh, "triangles", ()), dtype=np.float64)
     if tris.ndim != 3 or tris.shape[0] == 0:
@@ -246,9 +257,10 @@ def _exact_narrow_band(
     if len(tris) == 0:
         return empty
 
-    prim = _split_triangles(tris, float(pitch))
-    centers = prim.mean(axis=1)
-    rho = float(np.max(np.linalg.norm(prim - centers[:, None, :], axis=2)))
+    # 单精度足够：坐标是 mm 量级，float32 的相对精度 1e-7 → 绝对误差 ~1e-5 mm，
+    # 比体素小 5 个数量级；但逐元素运算的内存流量减半，实测快 ~1.8 倍。
+    prim = _split_triangles(tris, float(pitch)).astype(np.float32)
+    centers = prim.mean(axis=1, dtype=np.float64)
     tree = cKDTree(centers, compact_nodes=True, balanced_tree=True)
 
     flat = np.flatnonzero(np.asarray(candidates, dtype=bool).reshape(-1))
@@ -257,7 +269,6 @@ def _exact_narrow_band(
     vi, vj, vk = np.unravel_index(flat, shape)
     limit = float(band) * float(pitch)
     k = int(max(1, min(int(neighbors), len(centers))))
-    covered = 0
 
     for start in range(0, flat.size, _VOXEL_CHUNK):
         stop = min(flat.size, start + _VOXEL_CHUNK)
@@ -269,14 +280,16 @@ def _exact_narrow_band(
                 origin[2] + (vk[sl] + 0.5) * float(pitch),
             )
         )
-        gap, idx = tree.query(pts, k=k, workers=_KD_WORKERS)
-        gap = gap.reshape(len(pts), k)
+        _gap, idx = tree.query(pts, k=k, workers=_KD_WORKERS)
         idx = idx.reshape(len(pts), k)
         miss = idx >= len(centers)  # 邻居不足 k 个时 scipy 用 len(centers) 占位
         np.minimum(idx, len(centers) - 1, out=idx)
         corners = prim[idx.reshape(-1)]
         d = _point_triangle_dist(
-            np.repeat(pts, k, axis=0), corners[:, 0], corners[:, 1], corners[:, 2]
+            np.repeat(pts.astype(np.float32), k, axis=0),
+            corners[:, 0],
+            corners[:, 1],
+            corners[:, 2],
         ).reshape(len(pts), k)
         d[miss] = np.inf
         best = d.min(axis=1)
@@ -286,11 +299,8 @@ def _exact_narrow_band(
         target = flat[sl][ok]
         flat_dist[target] = best[ok]
         flat_touched[target] = True
-        covered += int(np.count_nonzero(gap[ok, -1] >= best[ok] + rho))
 
-    hit = int(flat_touched.sum())
-    ratio = float(covered) / float(hit) if hit else 0.0
-    return flat_dist.reshape(shape), flat_touched.reshape(shape), ratio
+    return flat_dist.reshape(shape), flat_touched.reshape(shape)
 
 
 # --------------------------------------------------------------------------- #
@@ -328,6 +338,11 @@ def _void_pocket_radii(
             return [], 0
         lo = [int(a.min()) for a in idx]
         hi = [int(a.max()) for a in idx]
+    # 包围盒向内收一格：模型体素化后与包围盒之间常有不到 1 个体素的缝隙，
+    # 盒角会留下一小片"空腔"，不收会让它冒充小孔。
+    inset = 1
+    lo = [min(v + inset, h) for v, h in zip(lo, hi)]
+    hi = [max(h - inset, v) for v, h in zip(hi, lo)]
     box = np.zeros_like(solid)
     box[lo[0] : hi[0] + 1, lo[1] : hi[1] + 1, lo[2] : hi[2] + 1] = True
     void = box & ~solid
@@ -339,7 +354,10 @@ def _void_pocket_radii(
     if not ids:
         return [], 0
     peaks = np.atleast_1d(ndimage.maximum(field, labels, ids)).astype(np.float64)
-    radii = [float(v) for v in peaks if float(v) > 0.0]
+    # 峰值小于 3/4 体素的空腔半宽不到 1 个体素，几乎都是射线奇偶填充/降采样留下的
+    # 噪声（真正这么小的孔在占据栅格里已经塌了），丢掉它们免得刷出假告警。
+    keep = peaks >= 0.75 * float(sub_pitch)
+    radii = [float(v) for v in peaks[keep]]
     return radii, len(radii)
 
 
@@ -415,8 +433,15 @@ def feature_report(
     scan_shape = tuple(int(v) for v in sub.shape)
 
     # 体素化/降采样可能在空腔里留下孤立材料碎点，会把一条孔道切成几段（每段的
-    # 最大 SDF 都偏小，量出来就不是孔径了），一次 1 体素闭运算即可吃掉
-    solid = ndimage.binary_closing(sub <= 0.0, iterations=1)
+    # 最大 SDF 都偏小，量出来就不是孔径了）。只丢掉**面积极小**的实体连通域：
+    # 不能用闭运算糊，那会把毫米级小孔一起堵死。
+    solid = sub <= 0.0
+    parts, parts_n = ndimage.label(solid)
+    if parts_n > 1:
+        sizes = np.bincount(parts.ravel(), minlength=parts_n + 1)
+        keep = sizes >= int(min_voxels)
+        keep[0] = False
+        solid = keep[parts]
     radii, cavities = _void_pocket_radii(
         sub, solid, bounds=bounds, origin=origin, sub_pitch=sub_pitch,
         min_voxels=int(min_voxels),
@@ -524,7 +549,6 @@ def mesh_to_volume(
     # 窄带精确化：EDT 的距离按体素中心量化（±0.5 体素），毫米级小孔正是死在
     # 这半个体素上。表面附近 band 个体素内换成精确的点—三角形距离，窄带外侧再留
     # 一个体素宽的 smoothstep 过渡带融回 EDT，接缝处不会有台阶。
-    exact_ratio = 0.0
     if exact_band and exact_band > 0:
         band = float(exact_band)
         # 候选体素：异类体素中心到表面的距离最远 0.87 个体素，所以
@@ -532,16 +556,18 @@ def mesh_to_volume(
         # 体素太多时按比例收窄 band（成本 ≈ 窄带体素数 × 候选数），保证高分辨率下
         # 体素化仍然是一次秒级操作。
         class_dist = np.where(occ, inside_dist, outside_dist)
-        candidates = class_dist <= (band + 1.0) * pitch
+        candidates = class_dist <= (band + _BAND_CANDIDATES) * pitch
         while int(candidates.sum()) > _BAND_MAX_VOXELS and band > 1.4:
             band = max(1.4, band * 0.8)
-            candidates = class_dist <= (band + 1.0) * pitch
-        exact, touched, exact_ratio = _exact_narrow_band(
+            candidates = class_dist <= (band + _BAND_CANDIDATES) * pitch
+        exact, touched = _exact_narrow_band(
             mesh, shape, origin, float(pitch), candidates, band=band
         )
         if touched.any():
-            # w：窄带内侧为 1，到 band 边缘降为 0；smoothstep 保证 C1 连续（无折角）
-            w = np.clip((band * pitch - exact) / (_BAND_TRANSITION * pitch), 0.0, 1.0)
+            # 权重：|d| <= band 的体素**完全**用精确距离（小孔腔内也是精确的，孔心
+            # 不会被打折），band ~ band+1 之间 smoothstep 融回 EDT，C1 连续无折角。
+            # 零等值面位于 |d|≈0，永远在纯精确区里，过渡带只影响远场形状。
+            w = np.clip(((band + _BAND_TRANSITION) * pitch - exact) / (_BAND_TRANSITION * pitch), 0.0, 1.0)
             w = np.where(touched, w * w * (3.0 - 2.0 * w), 0.0)
             near = np.where(touched, exact, 0.0)
             sdf = np.sign(sdf) * (w * near + (1.0 - w) * np.abs(sdf))
@@ -567,8 +593,6 @@ def mesh_to_volume(
         "resolution": int(max(shape)),
         "shape": tuple(int(v) for v in shape),
         "fill_ratio": float(occ.mean()),
-        # 窄带里拿到精确距离、且通过 KD-tree 认证的体素比例（诊断用）
-        "exact_ratio": float(exact_ratio),
     }
     if features:
         volume["features"] = features

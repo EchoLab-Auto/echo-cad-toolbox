@@ -2,8 +2,8 @@
 
 用户反馈的核心问题：模型上有 Ø2 mm 这类毫米级小孔时，晶格化出来的多面体在孔
 附近明显失真（孔壁磨圆、孔变小甚至糊死）。根因是距离场按体素中心量化，误差
-最大 ±0.5 个体素。``app/lattice/sdf.py`` 把表面附近的距离换成精确的点—三角形
-距离，本文件用「孔壁半径误差」把改进量化出来。
+最大 ±0.5 个体素。``app/lattice/voxel.py`` 的窄带精确化把表面附近的距离换成
+精确的点—三角形距离，本文件用「孔壁半径误差」把改进量化出来。
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 import trimesh
 
-from app.lattice import sdf as sdf_mod
 from app.lattice import voxel
 
 HOLE_R = 1.0  # Ø2 mm
@@ -87,9 +86,7 @@ def test_exact_band_beats_plain_edt() -> None:
     """同样的网格，关掉窄带精确化（纯 EDT）误差应该更大 —— 这是改进的直接证据。"""
     mesh = _plate_with_hole()
     volume = voxel.mesh_to_volume(mesh, resolution=41)
-    plain = dict(volume)
-    plain_sdf = sdf_mod  # noqa: F841  (仅用于说明对照来源)
-    # 手工重建一条"纯 EDT"路径：exact_band=0
+    # 同一模型的"纯 EDT"路径：exact_band=0
     edt_only = voxel.mesh_to_volume(mesh, resolution=41, exact_band=0.0)
 
     new_err = min(
@@ -139,7 +136,7 @@ def test_point_triangle_distance_matches_bruteforce() -> None:
     rng = np.random.default_rng(0)
     tris = rng.normal(size=(8, 3, 3))
     pts = rng.normal(size=(8, 3))
-    d = sdf_mod._point_triangle_pairs(pts, tris[:, 0], tris[:, 1], tris[:, 2])
+    d = voxel._point_triangle_dist(pts, tris[:, 0], tris[:, 1], tris[:, 2])
 
     # 暴力：在三角形上撒 200×200 个重心坐标采样点，取最小距离
     u = np.linspace(0, 1, 200)
