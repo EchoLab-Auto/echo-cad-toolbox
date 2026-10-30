@@ -30,6 +30,17 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+# 同步源码（必须在**读取任何默认值之前**做）：PULL=1 会把脚本自身换成新版本，
+# 若先求值 IMAGE 再 reset，新版本代码会顶着旧 tag 构建（"鸡生蛋"问题）。
+# 同步完 exec 一次自己，让新脚本参与真正的部署流程。
+if [ "${PULL:-0}" = "1" ] && [ -z "${_DEPLOY_RESYNCED:-}" ]; then
+  echo "[0/4] 同步源码"
+  git fetch --depth 1 origin main
+  git reset --hard origin/main
+  git log --oneline -1
+  _DEPLOY_RESYNCED=1 exec env _DEPLOY_RESYNCED=1 PULL=0 "$0" "$@"
+fi
+
 PORT="${1:-${PORT:-8080}}"
 IMAGE="${IMAGE:-echo-cad-toolbox:1.2.0}"
 NAME="${NAME:-echo-cad-toolbox}"
@@ -41,13 +52,6 @@ if [ -z "${MEMORY:-}" ]; then
   HALF_MB=$(( $(awk '/^MemTotal:/{print int($2/1024/2)}' /proc/meminfo) ))
   [ "$HALF_MB" -gt 2048 ] && HALF_MB=2048
   MEMORY="${HALF_MB}m"
-fi
-
-if [ "${PULL:-0}" = "1" ]; then
-  echo "[0/4] 同步源码"
-  git fetch --depth 1 origin main
-  git reset --hard origin/main
-  git log --oneline -1
 fi
 
 echo "[1/4] 构建镜像 $IMAGE"
