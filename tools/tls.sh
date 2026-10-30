@@ -15,6 +15,9 @@
 #   ./tools/tls.sh status             # 看证书与前程状态
 #   ./tools/tls.sh renew              # 强制重签证书
 #
+# 证书是两段式的（本地 CA + 服务端叶子）：不改客户端也能用（首次点一次
+# 『继续前往』），想彻底没有警告就把 ca.pem 装进系统/浏览器的信任库。
+#
 # 环境变量：
 #   PORT          对外端口（默认 2228）—— 前置容器监听它
 #   BACKEND_PORT  后端回环端口（默认 18080）—— 工具箱容器绑 127.0.0.1:这个
@@ -53,33 +56,62 @@ detect_public_ip() {
   hostname -I 2>/dev/null | awk '{print $1}'
 }
 
-gen_cert() {
-  mkdir -p "$CERT_DIR"
-  pub=$(detect_public_ip)
-  san="IP:127.0.0.1,DNS:localhost"
-  [ -n "$pub" ] && san="$san,IP:$pub"
-  # 本机所有网卡地址也带上：内网/专线访问时同样不报 SAN 不匹配
+build_san() {
+  # SAN 里必须包含用户**实际会用的**地址，否则浏览器连"点继续前往"的机会都不给
+  # （SAN 不匹配是硬错误，不给点）。公网 IP 优先，再加所有本机网卡和 localhost。
+  _pub=$(detect_public_ip)
+  _san="IP:127.0.0.1,DNS:localhost"
+  [ -n "$_pub" ] && _san="$_san,IP:$_pub"
   for ip in $(hostname -I 2>/dev/null); do
     case "$ip" in 127.*) continue ;; esac
-    case "$san" in *"IP:$ip"*) ;; *) san="$san,IP:$ip" ;; esac
+    case "$_san" in *"IP:$ip"*) ;; *) _san="$_san,IP:$ip" ;; esac
   done
   if [ -n "${CERT_HOSTS:-}" ]; then
-    for h in $(echo "$CERT_HOSTS" | tr ',' ' '); do san="$san,DNS:$h"; done
+    for h in $(echo "$CERT_HOSTS" | tr ',' ' '); do _san="$_san,DNS:$h"; done
   fi
+  echo "$_san"
+}
 
-  echo "      生成自签证书 → $CERT_DIR（有效期 $DAYS 天）"
+gen_cert() {
+  mkdir -p "$CERT_DIR"
+  san=$(build_san)
+
+  # 两段式签发：自建 CA + 服务端证书。
+  #
+  # 为什么不直接签一张自签叶子证书：只是"能用"的话一张自签叶子就够了（浏览器
+  # 点一次继续前往）。但想**彻底没有警告**就必须把根证书装进客户端信任库，
+  # 而信任库只接受 CA:TRUE 的证书 —— 自签叶子是 CA:FALSE，装进去 Chrome 会报
+  # "certificate is not a CA"。所以按 mkcert 的路子走：本地 CA 签叶子，
+  # 客户端只需装 ca.pem 这一张，换 IP/续签叶子时都不用再动客户端。
+  echo "      生成证书 → $CERT_DIR（叶子 $DAYS 天 / CA 10 年）"
   echo "        SAN: $san"
-  # -addext 需要 OpenSSL 1.1.1+；这里同时写 basicConstraints/keyUsage，
-  # 否则部分浏览器对自签证书的用途检查更严。
-  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days "$DAYS" \
-    -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-    -subj "/CN=echo-cad-toolbox/O=echo-cad-toolbox (self-signed)" \
-    -addext "subjectAltName=$san" \
-    -addext "basicConstraints=critical,CA:FALSE" \
-    -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-    -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1
+
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+    -keyout "$CERT_DIR/ca.key" -out "$CERT_DIR/ca.pem" \
+    -subj "/CN=echo-cad-toolbox local CA/O=echo-cad-toolbox" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+
+  openssl req -new -newkey rsa:2048 -nodes -sha256 \
+    -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/leaf.csr" \
+    -subj "/CN=echo-cad-toolbox/O=echo-cad-toolbox" >/dev/null 2>&1
+
+  cat > "$CERT_DIR/leaf.ext" <<EOF
+subjectAltName=$san
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+EOF
+
+  openssl x509 -req -in "$CERT_DIR/leaf.csr" -sha256 -days "$DAYS" \
+    -CA "$CERT_DIR/ca.pem" -CAkey "$CERT_DIR/ca.key" -CAcreateserial \
+    -extfile "$CERT_DIR/leaf.ext" -out "$CERT_DIR/leaf.pem" >/dev/null 2>&1
+
+  cat "$CERT_DIR/leaf.pem" "$CERT_DIR/ca.pem" > "$CERT_DIR/fullchain.pem"
+  rm -f "$CERT_DIR/leaf.csr" "$CERT_DIR/leaf.ext" "$CERT_DIR/ca.srl"
+
   chmod 644 "$CERT_DIR/privkey.pem"   # nginx worker 以非 root 跑，需可读
-  chmod 644 "$CERT_DIR/fullchain.pem"
+  chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/ca.pem" "$CERT_DIR/leaf.pem"
 }
 
 render_conf() {
@@ -96,7 +128,11 @@ cmd="${1:-up}"
 
 case "$cmd" in
   up)
-    [ -f "$CERT_DIR/fullchain.pem" ] && [ -f "$CERT_DIR/privkey.pem" ] || gen_cert
+    # 老版本签的是"单张自签叶子"，信任库装不进去（CA:FALSE），升级后自动重签
+    if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ] \
+       || [ ! -f "$CERT_DIR/ca.pem" ] || [ ! -f "$CERT_DIR/leaf.pem" ]; then
+      gen_cert
+    fi
     # 证书快过期了（<7 天）就顺手重签，避免哪天突然打不开
     if openssl x509 -checkend $((7 * 86400)) -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
       :
@@ -154,11 +190,15 @@ case "$cmd" in
     ;;
 
   status)
-    echo "证书：$CERT_DIR"
-    if [ -f "$CERT_DIR/fullchain.pem" ]; then
-      openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -subject -dates -ext subjectAltName 2>/dev/null | sed 's/^/  /'
+    if [ -f "$CERT_DIR/leaf.pem" ]; then
+      echo "服务端证书（$CERT_DIR/leaf.pem）"
+      openssl x509 -in "$CERT_DIR/leaf.pem" -noout -subject -dates -ext subjectAltName 2>/dev/null | sed 's/^/  /'
+      echo "本地根证书（$CERT_DIR/ca.pem）—— 装到客户端就不再有任何警告"
+      openssl x509 -in "$CERT_DIR/ca.pem" -noout -fingerprint -sha256 2>/dev/null | sed 's/^/  /'
+      echo "  下载：openssl s_client -connect 127.0.0.1:$PORT </dev/null 2>/dev/null \\"
+      echo "           | sed -n '/BEGIN CERTIFICATE/,$p' > cad-ca.pem   # 取链上最后一张"
     else
-      echo "  （还没有证书）"
+      echo "  （还没有证书，跑 \"$0 up\" 生成）"
     fi
     echo "前置容器："
     docker ps -a --filter "name=$TLS_NAME" --format '  {{.Names}}  {{.Image}}  {{.Status}}' || true
