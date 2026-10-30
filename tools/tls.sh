@@ -121,10 +121,23 @@ case "$cmd" in
       -v "$CERT_DIR:/etc/nginx/certs:ro" \
       --label "app=$TLS_NAME" \
       "$IMG" >/dev/null
-    sleep 2
-    if ! docker ps --filter "name=$TLS_NAME" --filter "status=running" -q | grep -q .; then
-      echo "      ✗ 前置容器起不来："
+    # 只查 docker ps 是不够的：bind 失败时容器状态在 Up / Restarting 之间抖，
+    # 恰好落在 Up 上就会误报成功（2228 被别的实例占着时就是这个现象）。
+    # 所以两条路都真打一次：明文透传 + TLS 终止。
+    ok_http=0
+    ok_tls=0
+    i=0
+    while [ "$i" -lt 20 ]; do
+      curl -sf -m 3 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && ok_http=1
+      curl -sfk -m 3 "https://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && ok_tls=1
+      [ "$ok_http" = "1" ] && [ "$ok_tls" = "1" ] && break
+      i=$((i + 1)); sleep 1
+    done
+    if [ "$ok_http" != "1" ] || [ "$ok_tls" != "1" ]; then
+      echo "      ✗ 前置没通（http=$ok_http https=$ok_tls），容器日志："
       docker logs --tail 15 "$TLS_NAME" 2>&1 | sed 's/^/        /'
+      ss -tlnp 2>/dev/null | grep -E ":$PORT " | sed 's/^/        端口占用: /'
+      docker rm -f "$TLS_NAME" >/dev/null 2>&1 || true
       exit 1
     fi
     echo "      ✓ TLS 前置就绪：:$PORT 同时服务 http/https（后端 127.0.0.1:$BACKEND_PORT）"
