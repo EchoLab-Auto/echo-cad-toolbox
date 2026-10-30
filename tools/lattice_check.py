@@ -138,7 +138,12 @@ def main() -> int:
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(args=CHROME_FLAGS)
-        page = browser.new_page(viewport={"width": 1600, "height": 900})
+        # https 站点（含自签证书）要放行，否则检查脚本连门都进不去。
+        # 注意这不影响 isSecureContext 的判定：scheme 是 https 就够了。
+        page = browser.new_page(
+            viewport={"width": 1600, "height": 900},
+            ignore_https_errors=BASE.startswith("https://"),
+        )
 
         page.on("pageerror", lambda e: js_errors.append(str(e)))
         page.on("requestfailed", lambda r: failed.append(f"{r.url} ({r.failure})"))
