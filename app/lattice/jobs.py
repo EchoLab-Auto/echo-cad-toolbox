@@ -332,7 +332,7 @@ class JobStore:
         res = int(max(48, min(resources.MAX_RESOLUTION_HARD_LIMIT, int(resolution))))
         try:
             volume = self._ensure_volume(job, res)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - 任何失败都要回传成用户可读的错误
             job.set_state(status="ready", stage="体素化失败", error=str(exc))
             raise JobError(f"体素化失败：{exc}") from exc
         finally:

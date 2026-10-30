@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
+import json
 import mimetypes
 from typing import Any
-
-import json
 
 import numpy as np
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile

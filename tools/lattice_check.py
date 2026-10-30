@@ -332,9 +332,8 @@ def main() -> int:
             }"""
         )
         if all(v > 84 for v in sizes.values()):
-            ok("浏览器端导出：STL %s / OBJ %s / PLY %s / 3MF %s KB" % tuple(
-                round(v / 1024) for v in sizes.values()
-            ))
+            stl_kb, obj_kb, ply_kb, mf_kb = (round(v / 1024) for v in sizes.values())
+            ok(f"浏览器端导出：STL {stl_kb} / OBJ {obj_kb} / PLY {ply_kb} / 3MF {mf_kb} KB")
         else:
             bad(f"浏览器端导出异常：{sizes}")
 

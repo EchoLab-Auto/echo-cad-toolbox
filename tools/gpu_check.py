@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sys
 
 from playwright.sync_api import sync_playwright
