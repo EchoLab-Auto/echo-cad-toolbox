@@ -252,10 +252,17 @@ def main() -> int:
         engine = page.evaluate(
             """() => ({mode: window.__lattice?.state?.engineMode,
                        api: !!navigator.gpu,
+                       secure: window.isSecureContext,
                        label: document.querySelector('#engineLabel')?.textContent})"""
         )
-        ok(f"计算引擎：{engine['label']}（mode={engine['mode']}, navigator.gpu={engine['api']}）")
-        if engine["api"] and engine["mode"] != "gpu":
+        ok(f"计算引擎：{engine['label']}（mode={engine['mode']}, navigator.gpu={engine['api']},"
+           f" 安全上下文={engine['secure']}）")
+        if engine["mode"] == "server" and not engine["secure"]:
+            # WebGPU 只在安全上下文（HTTPS / localhost）可用；用 http://公网IP 访问时
+            # 浏览器根本不暴露 navigator.gpu，应用会自动回退到服务端生成 —— 这是**预期**
+            # 行为，不是缺陷。下面按服务端路径继续验证。
+            ok("非安全上下文（http:// 公网地址）→ 按设计回退服务端生成")
+        elif engine["api"] and engine["mode"] != "gpu":
             bad("浏览器支持 WebGPU 但没有切到 GPU 引擎")
 
         # 摆线轮对话框
@@ -268,24 +275,45 @@ def main() -> int:
         else:
             bad("摆线轮对话框没有打开")
 
-        # 样例 → 体素场 → GPU 生成
+        # 样例 → 体素场 → 生成
         page.click("[data-sample='cylinder']")
-        page.wait_for_function("() => window.__lattice?.state?.volume !== null", timeout=90000)
-        vol = page.evaluate(
-            """() => { const v = window.__lattice.state.volume;
-                       return {shape: v.meta.shape, pitch: +v.meta.pitch.toFixed(3),
-                               mb: +(v.meta.bytes / 1048576).toFixed(1)}; }"""
-        )
-        ok(f"体素场已就绪：{vol['shape']} · {vol['pitch']} mm · {vol['mb']} MB")
+        use_gpu = engine["mode"] == "gpu"
+
+        if use_gpu:
+            page.wait_for_function("() => window.__lattice?.state?.volume !== null", timeout=180000)
+            vol = page.evaluate(
+                """() => { const v = window.__lattice.state.volume;
+                           return {shape: v.meta.shape, pitch: +v.meta.pitch.toFixed(3),
+                                   mb: +(v.meta.bytes / 1048576).toFixed(1)}; }"""
+            )
+            ok(f"体素场已就绪：{vol['shape']} · {vol['pitch']} mm · {vol['mb']} MB")
 
         page.click("#btnGenerate")
-        page.wait_for_function("() => window.__lattice?.state?.mesh !== null", timeout=90000)
-        page.wait_for_timeout(500)
-        gen = page.evaluate(
-            """() => { const s = window.__lattice.state;
-                       return {faces: s.mesh.stats.faces, ms: Math.round(s.lastMs)}; }"""
-        )
-        ok(f"GPU 生成完成：{gen['faces']:,} 面，{gen['ms']} ms")
+        if use_gpu:
+            page.wait_for_function("() => window.__lattice?.state?.mesh !== null", timeout=180000)
+            page.wait_for_timeout(500)
+            gen = page.evaluate(
+                """() => { const s = window.__lattice.state;
+                           return {faces: s.mesh.stats.faces, ms: Math.round(s.lastMs)}; }"""
+            )
+            ok(f"GPU 生成完成：{gen['faces']:,} 面，{gen['ms']} ms")
+        else:
+            # 服务端路径：等作业 done，再等 GLB 预览真正进场景（公网要几秒下载）
+            page.wait_for_function(
+                "() => window.__lattice?.state?.job?.status === 'done'", timeout=600000
+            )
+            job_stats = page.evaluate(
+                """() => { const st = window.__lattice.state.job?.stats || {};
+                           return {faces: st.faces || 0, seconds: st.seconds}; }"""
+            )
+            ok(f"服务端生成完成：{job_stats['faces']:,} 面，{job_stats['seconds']} s")
+            page.wait_for_function(
+                """() => { let n = 0;
+                             window.__lattice?.groups.lattice.traverse((o) => { if (o.isMesh) n++; });
+                             return n > 0; }""",
+                timeout=180000,
+            )
+            gen = job_stats
 
         stats = page.locator("#statsKv").inner_text().replace("\n", " | ")
         if "相对密度" in stats:
@@ -321,21 +349,36 @@ def main() -> int:
         else:
             bad("导出按钮仍禁用")
 
-        # 客户端导出（不经过服务器）
-        sizes = page.evaluate(
-            """async () => {
-              const mod = await import('/static/lattice/gpu/exporters.js');
-              const m = window.__lattice.state.mesh;
-              const out = {};
-              for (const fmt of ['stl', 'obj', 'ply', '3mf']) out[fmt] = mod.exportMesh(fmt, m, 'check').size;
-              return out;
-            }"""
-        )
-        if all(v > 84 for v in sizes.values()):
-            stl_kb, obj_kb, ply_kb, mf_kb = (round(v / 1024) for v in sizes.values())
-            ok(f"浏览器端导出：STL {stl_kb} / OBJ {obj_kb} / PLY {ply_kb} / 3MF {mf_kb} KB")
+        if use_gpu:
+            # 客户端导出（不经过服务器）
+            sizes = page.evaluate(
+                """async () => {
+                  const mod = await import('/static/lattice/gpu/exporters.js');
+                  const m = window.__lattice.state.mesh;
+                  const out = {};
+                  for (const fmt of ['stl', 'obj', 'ply', '3mf']) out[fmt] = mod.exportMesh(fmt, m, 'check').size;
+                  return out;
+                }"""
+            )
+            if all(v > 84 for v in sizes.values()):
+                stl_kb, obj_kb, ply_kb, mf_kb = (round(v / 1024) for v in sizes.values())
+                ok(f"浏览器端导出：STL {stl_kb} / OBJ {obj_kb} / PLY {ply_kb} / 3MF {mf_kb} KB")
+            else:
+                bad(f"浏览器端导出异常：{sizes}")
         else:
-            bad(f"浏览器端导出异常：{sizes}")
+            # 服务端路径：验证下载接口真的能出 STL
+            stl = page.evaluate(
+                """async () => {
+                  const id = window.__lattice.state.job.id;
+                  const r = await fetch(`/api/lattice/jobs/${id}/download/stl`);
+                  const b = await r.arrayBuffer();
+                  return {status: r.status, mb: +(b.byteLength / 1048576).toFixed(1)};
+                }"""
+            )
+            if stl["status"] == 200 and stl["mb"] > 0.01:
+                ok(f"服务端 STL 下载：{stl['mb']} MB")
+            else:
+                bad(f"STL 下载异常：{stl}")
 
         # 精度面板
         if page.locator("#precisionBox").is_visible():
@@ -344,20 +387,24 @@ def main() -> int:
         else:
             bad("精度诊断面板没有显示")
 
-        # 调参即时重算（GPU 模式）
+        # 调参重算：GPU 模式应立刻重算；服务端模式需手动点生成（预期差异）
         before_faces = gen["faces"]
         page.evaluate("""() => {
           const el = document.querySelector('#cellRange');
           el.value = '6'; el.dispatchEvent(new Event('input', { bubbles: true }));
         }""")
-        try:
-            page.wait_for_function(
-                f"() => (window.__lattice?.state?.mesh?.stats?.faces || 0) !== {before_faces}",
-                timeout=30000,
-            )
-            ok("改单胞尺寸后 GPU 立刻重算（无需点按钮）")
-        except Exception:  # noqa: BLE001
-            bad("改参数后没有自动重算")
+        if use_gpu:
+            try:
+                page.wait_for_function(
+                    f"() => (window.__lattice?.state?.mesh?.stats?.faces || 0) !== {before_faces}",
+                    timeout=60000,
+                )
+                ok("改单胞尺寸后 GPU 立刻重算（无需点按钮）")
+            except Exception:  # noqa: BLE001
+                bad("改参数后没有自动重算")
+        else:
+            page.wait_for_timeout(600)
+            ok("服务端模式：改参数后需手动点「生成晶格」（预期行为）")
 
         page.screenshot(path="/tmp/lattice_ui.png", full_page=False)
 

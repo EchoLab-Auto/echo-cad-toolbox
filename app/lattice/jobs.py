@@ -59,6 +59,23 @@ def release_memory() -> None:
         pass  # 非 glibc 平台（musl / macOS）没有这个符号，忽略
 
 
+def _voxel_info(volume: dict, resolution: int) -> dict:
+    """作业快照里的体素信息（含小特征诊断）。
+
+    诊断（最小孔半径 / 推荐分辨率）随 ``volume`` 一起缓存，放进快照后**服务端生成
+    路径**也能在前端显示精度提示 —— 之前只有 GPU 路径（要拉体素场）才有这份信息。
+    """
+    info = {
+        "resolution": int(resolution),
+        "pitch": float(volume["pitch"]),
+        "shape": [int(v) for v in volume["shape"]],
+    }
+    features = volume.get("features")
+    if isinstance(features, dict) and features:
+        info["features"] = features
+    return info
+
+
 class Job:
     def __init__(self, job_id: str, directory: Path):
         self.id = job_id
@@ -332,7 +349,7 @@ class JobStore:
         res = int(max(48, min(resources.MAX_RESOLUTION_HARD_LIMIT, int(resolution))))
         try:
             volume = self._ensure_volume(job, res)
-        except Exception as exc:  # noqa: BLE001 - 任何失败都要回传成用户可读的错误
+        except Exception as exc:  # 任何失败都要回传成用户可读的错误
             job.set_state(status="ready", stage="体素化失败", error=str(exc))
             raise JobError(f"体素化失败：{exc}") from exc
         finally:
@@ -352,11 +369,7 @@ class JobStore:
         volume = fld.mesh_to_volume(mesh, resolution=resolution)
         fld.save_volume(volume, job.volume_path)
         job.set_state(resolution=resolution)
-        job.info["voxel"] = {
-            "resolution": resolution,
-            "pitch": volume["pitch"],
-            "shape": list(volume["shape"]),
-        }
+        job.info["voxel"] = _voxel_info(volume, resolution)
         job.save_meta()
         return volume
 

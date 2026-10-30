@@ -650,10 +650,20 @@ function applyJob(job) {
       `模型就绪 · ${job.filename}`,
       voxel ? `体素 ${voxel.resolution} · ${voxel.pitch.toFixed(3)} mm` : ''
     );
+    // 服务端模式不拉体素场，但作业快照里已经带了体素尺寸与小特征诊断，
+    // 精度面板照样能显示（GPU 模式由 prepareVolume 里的 renderPrecision 覆盖）
+    if (voxel && !state.volume) {
+      renderPrecision({ ...voxel, bytes: 0, features: voxel.features || null });
+    }
   }
 
   if (job.status === 'done') {
     setBusy(false);
+    // 服务端模式：体素化是在生成时才发生的，所以精度诊断要在这里补一次
+    const voxelDone = job.info?.voxel;
+    if (voxelDone && !state.volume) {
+      renderPrecision({ ...voxelDone, bytes: 0, features: voxelDone.features || null });
+    }
     if (state.engineMode === 'server') {
       renderStats(job.stats, { engine: '服务器', seconds: job.stats?.seconds });
       setExportEnabled(true);
