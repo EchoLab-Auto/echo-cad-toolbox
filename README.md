@@ -119,17 +119,113 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 
 | 位置 | 地址 | 说明 |
 | --- | --- | --- |
-| cloud-server-2（腾讯云，广州） | <http://114.132.241.46:2228/> | 公网可达，`restart=unless-stopped`，内存上限 1 GiB（机器总内存仅 2 GB），跑 1.2.0 |
+| cloud-server-2（腾讯云，广州） | <http://114.132.241.46:2228/> · <https://114.132.241.46:2228/> | 公网可达，同一个端口同时服务 http/https，`restart=unless-stopped`，内存上限 1.2 GiB（机器总内存仅 2 GB），跑 1.2.0 |
 | cloud-server-2（子域名入口） | `http://cad.<你的域名>:2229/` | 域名前缀分流由 **echo-server-core** 的进程内插件 `esc.edge-router` 提供（见该仓 `docs/EDGE-ROUTER.md`）；本仓不再包含该反代 |
 | 4090 工作站（内网） | <http://192.168.31.35:18080/> | 局域网可达，见下节 |
 
-> ⚠️ **公网用 `http://` 访问时不会有浏览器 GPU 加速** —— WebGPU 只在**安全上下文**
-> （HTTPS 或 `localhost` / `127.0.0.1`）里暴露 `navigator.gpu`。用 `http://公网IP:2228`
-> 打开时浏览器根本不提供这个 API，工作台会自动回退到服务端生成（界面角标显示
-> 「服务器计算」，功能完整、只是慢一些），这是**浏览器的安全策略**，不是程序缺陷。
+> **公网请用 `https://` 打开**：WebGPU 只在**安全上下文**里暴露 `navigator.gpu`，
+> 而 `http://公网IP` 不是安全上下文 —— 用 http 打开时浏览器根本不提供这个 API，
+> 工作台会回退到服务端生成（角标显示「服务器计算」，功能完整但慢一到两个数量级）。
 >
-> 想在公网用上 GPU 路径，给入口配一张证书（任何 CA 或自签名 + 浏览器例外）即可：
-> 换成 `https://…` 后角标会变成 `GPU · <显卡型号>`，实测同一模型从 13 s 降到 0.1 s。
+> 同一个模型实测对比（cloud-server-2）：
+>
+> | 入口 | 角标 | 面数 | 耗时 |
+> | --- | --- | --- | --- |
+> | `http://…:2228` | 服务器计算 | 564,938 | 6.68 s |
+> | `https://…:2228` | GPU · nvidia lovelace | 805,576 | **0.26 s** |
+>
+> 这不是程序缺陷，是 Web 平台规范。想让任何入口都能用 GPU，见下一节。
+
+### 给入口配 HTTPS（公网也能用 GPU）
+
+WebGPU 的 `navigator.gpu` 是 `[SecureContext]` 接口，而**安全上下文只看 URL scheme，
+不看端口号** —— 所以不需要 443、不需要备案、不需要新开安全组端口，在已经在用的那个
+端口上加一层 TLS 就够了：
+
+```bash
+TLS=1 PULL=1 PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
+  ./tools/deploy.sh 2228
+```
+
+脚本会做三件事：把后端改绑 `127.0.0.1:18080`（公网不再直连）、起一个 `nginx` 前置
+监听 `:2228`、按需签一张证书。前置用 `ssl_preread` 看首字节分流：
+
+| 首字节 | 去向 |
+| --- | --- |
+| TLS ClientHello | 本机 https server 终止 TLS，再转后端（会补 `X-Forwarded-Proto`） |
+| `GET` / `POST` … | 原样透传给后端 |
+
+因此**同一个端口的 `http://` 和 `https://` 都继续可用**，老链接不会失效。
+
+#### 证书是怎么来的
+
+`/etc/ssl/cad/` 下是两段式签发的（mkcert 的路子）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `ca.pem` / `ca.key` | 本地根证书（`CA:TRUE`，10 年）—— **装到客户端就全绿** |
+| `leaf.pem` / `privkey.pem` | 服务端证书（825 天），由上面的 CA 签发 |
+| `fullchain.pem` | `leaf + ca`，nginx 实际加载的文件 |
+
+叶子证书的 SAN 自动包含：公网 IP、本机所有网卡地址、`127.0.0.1`、`localhost`，
+外加 `CERT_HOSTS` 里给的域名。换 IP 只需 `./tools/tls.sh renew`，客户端装过的
+`ca.pem` 不用换。
+
+> **为什么不是单张自签证书**：单张自签叶子（`CA:FALSE`）装进系统信任库会被拒
+> —— Chrome 报 `certificate is not a CA`。要「彻底没有警告」就必须有 `CA:TRUE`
+> 的根证书，所以分两段签。
+
+#### 客户端要做什么
+
+| 做法 | 效果 | 适合 |
+| --- | --- | --- |
+| 什么都不做，首次访问点『高级 → 继续前往』 | 地址栏标「不安全」，但 **WebGPU 正常工作**（安全上下文判定只看 scheme） | 自己临时看效果 |
+| 装 `ca.pem` 进信任库 | 全绿锁，无任何警告 | 团队日常使用 |
+| 换公共 CA 签发的证书（见下） | 全绿锁，无需在客户端装任何东西 | 对外交付 |
+
+从服务器取根证书（`-showcerts` 才会输出完整链，第 1 张是叶子、第 2 张才是 CA）：
+
+```bash
+openssl s_client -showcerts -connect <host>:2228 </dev/null 2>/dev/null \
+  | awk '/BEGIN CERTIFICATE/{n++} n==2' > cad-ca.pem
+```
+
+装到系统信任库：
+
+```bash
+# Ubuntu / Debian
+sudo cp cad-ca.pem /usr/local/share/ca-certificates/cad-toolbox.crt && sudo update-ca-certificates
+# macOS
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain cad-ca.pem
+# Windows（管理员 PowerShell）
+certutil -addstore -f "ROOT" cad-ca.pem
+# Linux 上的 Chrome/Chromium 走 NSS，还需要单独导一次
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "cad-toolbox" -i cad-ca.pem
+```
+
+#### 有域名 / 有公共证书时
+
+```bash
+# 域名加到 SAN 里
+CERT_HOSTS=cad.example.com TLS=1 ./tools/deploy.sh 2228
+
+# 或者直接用真证书覆盖掉自签的这一套（文件名保持一样即可，nginx 认路径）
+cp /path/to/fullchain.pem /etc/ssl/cad/fullchain.pem
+cp /path/to/privkey.pem   /etc/ssl/cad/privkey.pem
+./tools/tls.sh up
+```
+
+用 Let's Encrypt 时注意：大陆主机上 `HTTP-01` 走 80 端口大概率被「未备案域名」拦截
+（腾讯云会 302 到 `dnspod.qcloud.com/static/webblock.html`），所以要么用 **DNS-01**
+验证，要么用已备案域名。
+
+#### 日常命令
+
+```bash
+./tools/tls.sh status    # 看证书 SAN / 有效期 / 根证书指纹 / 前置容器状态
+./tools/tls.sh renew     # 重签叶子（换 IP 后跑这个）
+./tools/tls.sh down      # 拆掉前置，端口交回后端（回到纯 http 现状）
+```
 
 容器常驻参数（与 `tools/deploy.sh` 一致）：
 

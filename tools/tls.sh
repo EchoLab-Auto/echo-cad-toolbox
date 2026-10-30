@@ -195,8 +195,9 @@ case "$cmd" in
       openssl x509 -in "$CERT_DIR/leaf.pem" -noout -subject -dates -ext subjectAltName 2>/dev/null | sed 's/^/  /'
       echo "本地根证书（$CERT_DIR/ca.pem）—— 装到客户端就不再有任何警告"
       openssl x509 -in "$CERT_DIR/ca.pem" -noout -fingerprint -sha256 2>/dev/null | sed 's/^/  /'
-      echo "  下载：openssl s_client -connect 127.0.0.1:$PORT </dev/null 2>/dev/null \\"
-      echo "           | sed -n '/BEGIN CERTIFICATE/,$p' > cad-ca.pem   # 取链上最后一张"
+      echo "  客户端取根证书（链上第 2 张，第 1 张是服务端叶子）："
+      echo "    openssl s_client -showcerts -connect <host>:$PORT </dev/null 2>/dev/null \\"
+      echo "      | awk '/BEGIN CERTIFICATE/{n++} n==2' > cad-ca.pem"
     else
       echo "  （还没有证书，跑 \"$0 up\" 生成）"
     fi
