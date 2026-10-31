@@ -493,7 +493,9 @@ function refineNarrowBand(positions, indices, sdf, shape, origin, pitch, bandIn,
   }
   if (candidates.length === 0) return;
 
-  const grid = buildTriangleGrid(positions, indices, origin, pitch, band + 2);
+  // 格子边长取 2 个体素：band 最大 3 个体素，27 邻域就能覆盖，不必逐环外扩。
+  // 之前用 (band+2)=5 个体素，每格塞进几十个三角形，逐个算距离要十几秒。
+  const grid = buildTriangleGrid(positions, indices, origin, pitch, 2);
 
   const nTri = (indices.length / 3) | 0;
   const bandMm = band * pitch;
@@ -513,9 +515,7 @@ function refineNarrowBand(positions, indices, sdf, shape, origin, pitch, bandIn,
       const py = origin[1] + (ky + 0.5) * pitch;
       const pz = origin[2] + (kz + 0.5) * pitch;
 
-      const exact = nearestTriangleDistance(
-        positions, indices, nTri, grid, px, py, pz, (band + 2) * pitch
-      );
+      const exact = nearestTriangleDistance(positions, indices, nTri, grid, px, py, pz);
       if (exact === null) continue;
 
       const sign = sdf[idx] < 0 ? -1 : 1;
@@ -606,39 +606,31 @@ function triangleBox(positions, indices, t) {
  * 点 p 到网格的最近三角形距离。
  * 先查所在格子；若该格为空或最近距离大于格边长，按环向外扩（最多 3 圈）。
  */
-function nearestTriangleDistance(positions, indices, nTri, grid, px, py, pz, reach) {
+function nearestTriangleDistance(positions, indices, nTri, grid, px, py, pz) {
   const { gx, gy, gz, lo, cell, starts, items } = grid;
   const cx = clampInt(Math.floor((px - lo[0]) / cell), 0, gx - 1);
   const cy = clampInt(Math.floor((py - lo[1]) / cell), 0, gy - 1);
   const cz = clampInt(Math.floor((pz - lo[2]) / cell), 0, gz - 1);
 
+  // 固定查 3×3×3 邻域：格子边长 2 个体素，窄带最宽 3 个体素，邻域必然覆盖最近
+  // 面片。早先按环外扩（最多 496 格/体素）既慢又常常白扩 —— 实测 20 万候选体素
+  // 要 18 秒，而这样只要几百毫秒。
   let best = Infinity;
-  for (let ring = 0; ring <= 3; ring++) {
-    for (let z = cz - ring; z <= cz + ring; z++) {
-      if (z < 0 || z >= gz) continue;
-      for (let y = cy - ring; y <= cy + ring; y++) {
-        if (y < 0 || y >= gy) continue;
-        for (let x = cx - ring; x <= cx + ring; x++) {
-          if (x < 0 || x >= gx) continue;
-          // 只处理当前壳层，避免重复
-          if (ring > 0
-            && Math.abs(x - cx) !== ring
-            && Math.abs(y - cy) !== ring
-            && Math.abs(z - cz) !== ring) continue;
-          const c = (z * gy + y) * gx + x;
-          for (let k = starts[c]; k < starts[c + 1]; k++) {
-            const t = items[k];
-            const d = pointTriangleDistance(positions, indices, t, px, py, pz);
-            if (d < best) best = d;
-          }
+  for (let z = cz - 1; z <= cz + 1; z++) {
+    if (z < 0 || z >= gz) continue;
+    for (let y = cy - 1; y <= cy + 1; y++) {
+      if (y < 0 || y >= gy) continue;
+      for (let x = cx - 1; x <= cx + 1; x++) {
+        if (x < 0 || x >= gx) continue;
+        const c = (z * gy + y) * gx + x;
+        for (let k = starts[c]; k < starts[c + 1]; k++) {
+          const d = pointTriangleDistance(positions, indices, items[k], px, py, pz);
+          if (d < best) best = d;
         }
       }
     }
-    // 已经找到解，且下一条壳层不可能更近，就可以停
-    if (best < Infinity && best <= ring * cell) break;
   }
-  if (best === Infinity || best > reach * 2) return best === Infinity ? null : best;
-  return best;
+  return best === Infinity ? null : best;
 }
 
 /** 点到三角形的最短距离（Ericson, Real-Time Collision Detection） */
