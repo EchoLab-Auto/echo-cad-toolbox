@@ -157,6 +157,11 @@ TLS=1 PULL=1 PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
 
 因此**同一个端口的 `http://` 和 `https://` 都继续可用**，老链接不会失效。
 
+两个容器因此是**前置门房 + 后端本体**的关系：`echo-cad-toolbox-tls`（`nginx:alpine`，
+host 网络，独占对外的 `:2228`）→ `echo-cad-toolbox`（应用本体，只发布在
+`127.0.0.1:18080`，公网直连打不通）。后端不知道前置的存在，拆掉前置它照常跑，
+只是不再有 https。
+
 #### 证书是怎么来的
 
 `/etc/ssl/cad/` 下是两段式签发的（mkcert 的路子）：
@@ -224,7 +229,7 @@ cp /path/to/privkey.pem   /etc/ssl/cad/privkey.pem
 ```bash
 ./tools/tls.sh status    # 看证书 SAN / 有效期 / 根证书指纹 / 前置容器状态
 ./tools/tls.sh renew     # 重签叶子（换 IP 后跑这个）
-./tools/tls.sh down      # 拆掉前置，端口交回后端（回到纯 http 现状）
+./tools/tls.sh down      # 拆前置并把后端重新发布到公共端口（会重启后端 ~5s）
 ```
 
 容器常驻参数（与 `tools/deploy.sh` 一致）：

@@ -180,8 +180,33 @@ case "$cmd" in
     ;;
 
   down)
+    # 光删前置是不够的：后端此时只发布在 127.0.0.1:$BACKEND_PORT，公网端口
+    # 会变成没人监听 —— 看起来"拆成功"，实际全站不可达。必须把后端重新发布
+    # 到公网端口，才算真的回到"纯 http 直连"的现状。
+    BACKEND="${NAME:-echo-cad-toolbox}"
+    release_backend() {
+      docker inspect "$BACKEND" >/dev/null 2>&1 || return 0
+      local img mem bcip
+      img=$(docker inspect "$BACKEND" --format '{{.Config.Image}}')
+      mem=$(docker inspect "$BACKEND" --format '{{.HostConfig.Memory}}')
+      bcip=$(docker inspect "$BACKEND" --format \
+        '{{range $p,$v := .HostConfig.PortBindings}}{{range $v}}{{.HostIp}}{{end}}{{end}}')
+      [ "$bcip" = "127.0.0.1" ] || return 0          # 已经直连了，不用动
+      echo "      后端当前只在回环上，重新发布到 :$PORT 上（会重启后端，约 5s）"
+      memopt=""
+      [ -n "$mem" ] && [ "$mem" != "0" ] && memopt="--memory $mem"
+      docker rm -f "$BACKEND" >/dev/null 2>&1 || true
+      # shellcheck disable=SC2086  # memopt 有意不加引号（要拆成两个参数）
+      docker run -d --name "$BACKEND" --restart unless-stopped \
+        -p "$PORT:8080" $memopt \
+        -v "${BACKEND}-data:/app/data" --label "app=$BACKEND" \
+        "$img" >/dev/null
+      echo "      后端已直接监听 :$PORT（容器仍叫 $BACKEND）"
+    }
     docker rm -f "$TLS_NAME" >/dev/null 2>&1 || true
     echo "      已拆除 $TLS_NAME"
+    release_backend
+    echo "      现在只有 http://<host>:$PORT（没有 GPU 加速，WebGPU 需要 https）"
     ;;
 
   renew)
