@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,11 +18,16 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "tools" / "test-client.mjs"
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="本机没装 node，跳过浏览器端 JS 测试")
+def _node() -> str | None:
+    """找 node：环境变量 NODE 优先（容器里没装时可以指到宿主机上的），再查 PATH。"""
+    return os.environ.get("NODE") or shutil.which("node")
+
+
+@pytest.mark.skipif(_node() is None, reason="没装 node，跳过浏览器端 JS 测试（可设 NODE=/path/to/node）")
 def test_client_js() -> None:
     """STL 解析、体素化（解析解校验）、Worker 消息契约。"""
     result = subprocess.run(
-        ["node", "--experimental-default-type=module", str(SCRIPT)],
+        [_node() or "node", "--experimental-default-type=module", str(SCRIPT)],
         capture_output=True,
         text=True,
         timeout=300,

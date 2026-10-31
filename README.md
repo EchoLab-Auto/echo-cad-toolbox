@@ -542,7 +542,11 @@ echo-cad-toolbox/
 │       │   └── gpu/                            #   浏览器 GPU 生成引擎
 │       │       ├── engine.js                   #     缓冲区编排 / 三次 dispatch / 回读
 │       │       ├── lattice.wgsl                #     晶格场 + 等值面提取（计算着色器）
-│       │       └── exporters.js                #     STL / OBJ / PLY / 3MF 客户端导出
+│       │       ├── exporters.js                #     STL / OBJ / PLY / 3MF 客户端导出
+│       │       └── client/                     #   浏览器端算力（不依赖服务端）
+│       │           ├── loaders.js              #     STL 解析（二进制 / ASCII，顶点焊接）
+│       │           ├── voxelize.js             #     mesh → SDF（射线奇偶 + 精确 EDT）
+│       │           └── voxelize.worker.js      #     Web Worker 封装（不卡界面）
 │       └── vendor/three/                       # three.js 本地副本（离线可用）
 ├── tests/              # pytest：几何 / API / DXF / 晶格化
 ├── tools/
@@ -563,6 +567,10 @@ echo-cad-toolbox/
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest -q                     # 单元 / 接口测试（几何、DXF、晶格化、体素精度）
+
+# 浏览器端 JS（STL 解析 / 体素化解析解校验 / Worker 契约）——需要 node ≥ 18
+node --experimental-default-type=module tools/test-client.mjs
+#   容器里没装 node 时 pytest 会跳过这一项；也可用 NODE=/path/to/node 指过去
 
 # 端到端（需先启动服务；会捕获 JS 错误并做画布像素统计）
 playwright install chromium
@@ -596,7 +604,7 @@ python tools/shoot.py http://127.0.0.1:8080/
 | --- | --- |
 | 单胞尺寸 | 先取零件最小特征尺寸的 1/5 ~ 1/3；偏大撑不住，偏小打印不出来 |
 | 壁厚 / 杆径 | ≥ 2 × 体素尺寸；FDM 打印别低于 0.8 mm |
-| 分辨率 | 先用 128 ~ 160 排版试错，定稿再上 200 ~ 256（256 约 1 GB 内存） |
+| 分辨率 | 先用 128 ~ 160 排版试错，定稿再上 200 ~ 400（本机算，⌀167 的盘 320 约 0.8 s / 190 MB） |
 | 应用方式 | 承力件用「仅表层壳内填充」保留实心齿面；纯减重用「挖减重腔」 |
 | 抽稀 | 默认 30%；只做外观可以拉到 60%，要送 CAE 就设 0 |
 | 保留外表皮 | 想让零件「看起来还是原壳、里面是晶格」时打开 |
