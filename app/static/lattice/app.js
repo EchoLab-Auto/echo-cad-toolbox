@@ -20,7 +20,7 @@ import { GLTFLoader } from '/static/vendor/three/examples/jsm/loaders/GLTFLoader
 import { RoomEnvironment } from '/static/vendor/three/examples/jsm/environments/RoomEnvironment.js';
 import { GpuLatticeEngine } from './gpu/engine.js';
 import { exportMesh } from './gpu/exporters.js';
-import { parseMeshBuffer } from './client/loaders.js';
+import { parseMeshBuffer, parseMeshFile } from './client/loaders.js';
 
 const API = '/api/lattice';
 
@@ -43,6 +43,8 @@ const state = {
   volume: null,           // { meta, jobId, resolution, features }
   /** 本地三角网格（浏览器端体素化的输入）：{ positions, indices, format, jobId } */
   localMesh: null,
+  /** 刚解析完、还没绑定作业的本地网格（上传前就解析好，省一次下载往返） */
+  pendingMesh: null,
   mesh: null,             // { positions, normals, indices, stats }
   features: null,
   lastMs: 0,
@@ -813,6 +815,10 @@ async function adoptJob(job) {
   // 换作业 = 换模型，本地缓存的网格与体场一律作废（否则会拿旧模型算新参数）
   state.localMesh = null;
   state.volume = null;
+  if (state.pendingMesh) {
+    state.localMesh = { ...state.pendingMesh, jobId: job.id };
+    state.pendingMesh = null;
+  }
   applyJob(job);
   await loadPreview('original');
   setView('original');
@@ -1124,6 +1130,18 @@ async function handleFile(file) {
   resetResult();
   setBusy(true);
   setStatus(`正在解析 ${file.name}…`, '');
+
+  // STL 在本地解析一份：体素化要用它，先存着就不用再向服务端要一遍
+  // （服务端仍会收到原文件用于作业记录与原始模型预览）。
+  state.pendingMesh = null;
+  if (/\.stl$/i.test(file.name || '')) {
+    try {
+      state.pendingMesh = await parseMeshFile(file);
+    } catch (err) {
+      console.warn('本地解析 STL 失败，稍后从服务端取网格：', err);
+    }
+  }
+
   try {
     const job = await uploadWithProgress(file);
     await adoptJob(job);
