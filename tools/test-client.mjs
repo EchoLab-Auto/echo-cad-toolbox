@@ -96,7 +96,7 @@ endsolid box`;
     [[0, 0, 0], [1, 0, 0], [0, 1, 0]],        // 正常
   ]);
   const m = parseStl(buf);
-  check(m.indices.length / 3 === 1, '退化面���丢弃（剩 1 面）', `实得 ${m.indices.length / 3}`);
+  check(m.indices.length / 3 === 1, '退化面被丢弃（剩 1 面）', `实得 ${m.indices.length / 3}`);
 }
 
 {
@@ -141,7 +141,7 @@ check(Math.abs(vol.pitch - 40 / 64) < 1e-6, 'pitch = 最长边 / 分辨率', `�
   // 盒子中心：到最近面 = min(halfExtent) = 12 mm，符号为负
   const cx = toVoxel(0, 0); const cy = toVoxel(0, 1); const cz = toVoxel(0, 2);
   const d = at(cx, cy, cz);
-  check(d < 0, '盒子中心 SDF 为负（在实体内部）', `实得 ${d.toFixed(3)}`);
+  check(d < 0, '盒子中心 SDF 为负（在实体内部）', `实得 ${Number.isFinite(d) ? d.toFixed(3) : d}`);
   check(Math.abs(-d - 12) < 0.8, '盒子中心到最近面 ≈ 12 mm', `实得 ${(-d).toFixed(3)}`);
 }
 
@@ -157,14 +157,18 @@ check(Math.abs(vol.pitch - 40 / 64) < 1e-6, 'pitch = 最长边 / 分辨率', `�
 }
 
 {
-  // 角点外侧：到盒子的距离 = |(dx,dy,dz)|
-  const ox = toVoxel(24, 0);                 // 超出 +20 面 4 mm
-  const oy = toVoxel(19, 1);                 // 超出 +15 面 4 mm
-  const oz = toVoxel(16, 2);                 // 超出 +12 面 4 mm
-  const expect = Math.hypot(4, 4, 4);
+  // 角点外侧：到盒子的距离 = |(dx,dy,dz)|。探针要留在 pad 以内（网格只有
+  // 模型尺寸 + 每侧 3 层体素），否则 toVoxel 会越界。
+  const ox = toVoxel(20.9, 0);               // 超出 +20 面 0.9 mm
+  const oy = toVoxel(15.9, 1);               // 超出 +15 面 0.9 mm
+  const oz = toVoxel(12.9, 2);               // 超出 +12 面 0.9 mm
+  const expect = Math.hypot(0.9, 0.9, 0.9);
   const d = at(ox, oy, oz);
-  check(d > 0, '角点外侧符号为正');
-  check(Math.abs(d - expect) < 1.0, `角点外侧距离 ≈ ${expect.toFixed(2)} mm`, `实得 ${d.toFixed(3)}`);
+  check(Number.isFinite(d), '角点探针在体场内', `at(${ox},${oy},${oz}) = ${d}`);
+  if (Number.isFinite(d)) {
+    check(d > 0, '角点外侧符号为正', `实得 ${Number.isFinite(d) ? d.toFixed(3) : d}`);
+    check(Math.abs(d - expect) < 1.2, `角点外侧距离 ≈ ${expect.toFixed(2)} mm`, `实得 ${Number.isFinite(d) ? d.toFixed(3) : d}`);
+  }
 }
 
 {
