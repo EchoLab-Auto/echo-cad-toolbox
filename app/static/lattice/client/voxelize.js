@@ -233,8 +233,9 @@ function rayOccupancy(positions, indices, index, nx, ny, nz, origin, pitch, onPr
   const zStart = origin[2] + (nz + 2) * pitch;   // 体场上方，保证覆盖整个模型
 
   const hits = new Float64Array(256);            // 复用：单列的 Z 交点
-  const jitterX = [0, pitch * 1e-3, -pitch * 1e-3];
-  const jitterY = [0, pitch * 1e-3, -pitch * 1e-3];
+  // 抖动必须与服务端 voxel._ray_occupancy 逐字一致（(i%3-1) * 1e-3 * pitch），
+  // 否则切线附近哪些射线算作"穿过"会不同，曲面零件的奇偶填充就对不上。
+  const jitter = pitch * 1e-3;
 
   const nCol = nx * ny;
   const step = Math.max(1, Math.floor(nCol / 200));
@@ -245,8 +246,8 @@ function rayOccupancy(positions, indices, index, nx, ny, nz, origin, pitch, onPr
     const i = (col / ny) | 0;
     const j = col - i * ny;
     // 体素中心 + 轻微抖动
-    const px = origin[0] + (i + 0.5) * pitch + jitterX[i % 3];
-    const py = origin[1] + (j + 0.5) * pitch + jitterY[j % 3];
+    const px = origin[0] + (i + 0.5) * pitch + ((i % 3) - 1) * jitter;
+    const py = origin[1] + (j + 0.5) * pitch + ((j % 3) - 1) * jitter;
 
     const cx = clampInt(Math.floor((px - origin[0]) / cell), 0, gx - 1);
     const cy = clampInt(Math.floor((py - origin[1]) / cell), 0, gy - 1);
@@ -270,14 +271,32 @@ function rayOccupancy(positions, indices, index, nx, ny, nz, origin, pitch, onPr
     }
     if (nHit === 0) continue;
 
+    // 排序后去掉重复交点：射线正好穿过两个三角形的**公共边**时，Möller–Trumbore
+    // 会把两侧都算成命中，同一个交点记两次 → 奇偶翻转两次 = 什么都没发生，
+    // 整列被判成"空腔"。实测 torus 上一条射线能给出 4 个交点（实际只有 2 个），
+    // 整列从实体变成全空。去重容差取 pitch 的百万分之一，物理上不可能有真实的
+    // 两个面挨得这么近。
+    if (nHit > 1) {
+      for (let a = 1; a < nHit; a++) {          // 插入排序，nHit 通常 < 10
+        const value = hits[a];
+        let b = a - 1;
+        while (b >= 0 && hits[b] > value) { hits[b + 1] = hits[b]; b--; }
+        hits[b + 1] = value;
+      }
+    }
+
     // 交点下方最近的体素索引 k 满足 z_k < z_hit（与服务端同一套取整）
     const z0 = origin[2];
+    const tol = pitch * 1e-6;
+    let prev = -Infinity;
     for (let h = 0; h < nHit; h++) {
+      if (hits[h] - prev < tol) continue;       // 公共边上的重复命中
+      prev = hits[h];
       const k = Math.ceil((hits[h] - z0) / pitch - 1e-9) - 1;
       if (k < 0 || k >= nz) continue;
-      // 奇偶：从顶部向下累积，穿越奇数次 = 内部。这里直接对 [k..0] 取反太贵，
-      // 改为记录事件数、最后统一累加（见下）。
-      occ[col * nz + k] ^= 1;   // 事件标记（偶数次抵消）
+      // 奇偶：从顶部向下累积，穿越奇数次 = 内部。这里先记事件标记（异或），
+      // 最后统一从顶部累积（见下）。
+      occ[col * nz + k] ^= 1;
     }
   }
 
