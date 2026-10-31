@@ -3,9 +3,11 @@
  *
  * 两条算路，用户可切换（默认走浏览器 GPU）：
  *
- *   GPU（WebGPU）  服务端只做一次性体素化，之后每次参数调整都在显卡上算：
- *                  晶格场 × 实体场 → Surface Nets + Newton 投影 → 索引网格。
- *                  实测 160³ 体素约 100~200 ms，且不受服务端 1 GiB 内存限制。
+ *   GPU（WebGPU）  **体素化也在浏览器里做**（Web Worker + 精确 EDT），服务端
+ *                  只把三角网格发过来（STEP 这类必须用 OCCT 解格式的才需要它）。
+ *                  之后晶格场 × 实体场 → Surface Nets + Newton 投影 → 索引网格
+ *                  全在客户机上。分辨率只受本机内存与显存限制，不再被服务端
+ *                  容器内存钳住 —— 薄壁零件因此能真正画出来而不是碎成尖刺。
  *   服务器         传统路径：POST /generate → 轮询 → 拉 GLB 预览。
  *                  老浏览器 / 没有 WebGPU 时的兜底。
  *
@@ -18,6 +20,7 @@ import { GLTFLoader } from '/static/vendor/three/examples/jsm/loaders/GLTFLoader
 import { RoomEnvironment } from '/static/vendor/three/examples/jsm/environments/RoomEnvironment.js';
 import { GpuLatticeEngine } from './gpu/engine.js';
 import { exportMesh } from './gpu/exporters.js';
+import { parseMeshBuffer } from './client/loaders.js';
 
 const API = '/api/lattice';
 
@@ -38,6 +41,8 @@ const state = {
   engine: null,           // GpuLatticeEngine 实例
   engineProbe: null,      // { supported, label }
   volume: null,           // { meta, jobId, resolution, features }
+  /** 本地三角网格（浏览器端体素化的输入）：{ positions, indices, format, jobId } */
+  localMesh: null,
   mesh: null,             // { positions, normals, indices, stats }
   features: null,
   lastMs: 0,
@@ -324,10 +329,10 @@ function applyResourceLimits(cfg) {
   const serverLimit = cfg?.resources?.max_resolution ?? 320;
   state.serverMaxRes = serverLimit;
 
-  // GPU 模式下分辨率只受显存限制（服务端只做一次性体素化，但服务端的内存
-  // 上限仍然约束它算得出来的体场分辨率，所以两边取各自的上限）
+  // GPU 模式下体素化在客户机上做，服务端内存上限**不再约束**分辨率 ——
+  // 只受本机显存（estimateMaxResolution）与参数上限 400 约束。
   const gpuLimit = state.engine ? estimateMaxResolution(state.engine) : serverLimit;
-  const limit = state.engineMode === 'gpu' ? Math.max(serverLimit, Math.min(400, gpuLimit)) : serverLimit;
+  const limit = state.engineMode === 'gpu' ? Math.max(48, Math.min(400, gpuLimit)) : serverLimit;
 
   const allowed = [];
   for (const opt of resSel.options) {
@@ -340,8 +345,8 @@ function applyResourceLimits(cfg) {
   const hint = $('#resHint');
   hint.hidden = false;
   hint.textContent = state.engineMode === 'gpu'
-    ? `GPU 模式：显卡可跑 ${limit} 分辨率，只向服务器要一次性体素场（服务端最高 ${serverLimit}）。`
-    : `服务端检测到内存上限 ${cfg?.resources?.memory_limit_mb ?? '?'} MB，最高 ${serverLimit} 分辨率；切到浏览器 GPU 可更高。`;
+    ? `GPU 模式：体素化与晶格都在本机算，分辨率只受你的显卡限制，可跑 ${limit}。`
+    : `服务端检测到内存上限 ${cfg?.resources?.memory_limit_mb ?? '?'} MB，最高 ${serverLimit} 分辨率；切到浏览器 GPU 用你自己的机器，可以更高。`;
 }
 
 function syncLatticeLabels() {
@@ -805,6 +810,9 @@ function resetResult() {
 }
 
 async function adoptJob(job) {
+  // 换作业 = 换模型，本地缓存的网格与体场一律作废（否则会拿旧模型算新参数）
+  state.localMesh = null;
+  state.volume = null;
   applyJob(job);
   await loadPreview('original');
   setView('original');
@@ -815,6 +823,66 @@ async function adoptJob(job) {
 /* =========================================================================
  * 体素场（GPU 路径的一次性输入）
  * ====================================================================== */
+/* =========================================================================
+ * 体素场：默认在浏览器里算（客户机算力），服务端只提供三角网格
+ * ====================================================================== */
+
+/**
+ * 取原始三角网格（缓存）。服务端只做格式转换（STEP/IGES 必须用它），
+ * 拿到 STL 之后就再也不用麻烦它了。
+ */
+async function ensureLocalMesh() {
+  if (state.localMesh && state.localMesh.jobId === state.job.id) return state.localMesh;
+  setStatus('获取三角网格…', '');
+  const res = await fetch(`${API}/jobs/${state.job.id}/mesh`);
+  if (!res.ok) {
+    let detail = `网格获取失败（${res.status}）`;
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch { /* ignore */ }
+    throw new Error(detail);
+  }
+  const buffer = await res.arrayBuffer();
+  const parsed = parseMeshBuffer(buffer, '.stl');
+  state.localMesh = { ...parsed, jobId: state.job.id };
+  return state.localMesh;
+}
+
+/** 在 Web Worker 里体素化（不阻塞渲染），返回 {meta, buffer} */
+function voxelizeInWorker(mesh, resolution, onProgress) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = new Worker(new URL('./client/voxelize.worker.js', import.meta.url), { type: 'module' });
+    } catch (err) {
+      reject(new Error(`无法启动体素化线程：${err.message || err}`));
+      return;
+    }
+    const id = Math.random().toString(36).slice(2);
+    const cleanup = () => { try { worker.terminate(); } catch { /* ignore */ } };
+    worker.onmessage = (ev) => {
+      const msg = ev.data || {};
+      if (msg.id !== id) return;
+      if (msg.type === 'progress') {
+        if (onProgress) onProgress(msg.fraction, msg.stage);
+      } else if (msg.type === 'done') {
+        cleanup();
+        resolve(msg.result);
+      } else {
+        cleanup();
+        reject(new Error(msg.message || '体素化失败'));
+      }
+    };
+    worker.onerror = (ev) => {
+      cleanup();
+      reject(new Error(ev.message || '体素化线程异常'));
+    };
+    // 网格用结构化克隆复制：主线程还要留着它做"原始模型"预览与重新体素化
+    worker.postMessage({ id, positions: mesh.positions, indices: mesh.indices, options: { resolution } });
+  });
+}
+
 async function prepareVolume() {
   if (!state.job || !state.engine) return null;
   const resolution = +$('#resSel').value;
@@ -822,6 +890,46 @@ async function prepareVolume() {
     return state.volume;
   }
 
+  await nextFrame();
+  try {
+    showProgress(0.05, '读取三角网格…');
+    const mesh = await ensureLocalMesh();
+
+    showProgress(0.1, `本机体素化（${resolution}³）…`);
+    setStatus('本机体素化…', `${mesh.indices.length / 3} 面`);
+    const result = await voxelizeInWorker(mesh, resolution, (f, stage) => {
+      showProgress(0.1 + 0.85 * f, `${stage}（${resolution}³）`);
+    });
+
+    const meta = {
+      resolution: result.resolution,
+      shape: result.shape,
+      pitch: result.pitch,
+      origin: result.origin,
+      bounds: result.bounds,
+      bytes: result.sdf.byteLength,
+      local: true,
+    };
+    const grid = state.engine.setSolid(meta, result.sdf.buffer);
+    state.volume = { meta, jobId: state.job.id, resolution, features: result.features || null, grid };
+    renderPrecision(meta);
+    hideProgress();
+    const mb = (meta.bytes / 1048576).toFixed(1);
+    setStatus(
+      `模型就绪 · ${state.job.filename}`,
+      `本机算 · 体素 ${grid.nx}×${grid.ny}×${grid.nz} · ${meta.pitch.toFixed(3)} mm · ${mb} MB`
+    );
+    return state.volume;
+  } catch (err) {
+    // 本地算不了（老浏览器 / 线程被禁用）就退回服务端，别让用户卡住
+    console.warn('本机体素化失败，退回服务端：', err);
+    hideProgress();
+    return prepareVolumeRemote(resolution, err);
+  }
+}
+
+/** 兜底：服务端体素化（老浏览器 / 本地失败时） */
+async function prepareVolumeRemote(resolution, cause) {
   showProgress(0.1, `服务端体素化（${resolution}³）…`);
   setStatus('准备体素场…', '');
   await nextFrame();
@@ -845,7 +953,8 @@ async function prepareVolume() {
     renderPrecision(meta);
     hideProgress();
     const mb = (meta.bytes / 1048576).toFixed(1);
-    setStatus(`模型就绪 · ${state.job.filename}`, `体素 ${grid.nx}×${grid.ny}×${grid.nz} · ${meta.pitch.toFixed(3)} mm · ${mb} MB`);
+    const why = cause ? `（本机失败：${cause.message || cause}）` : '';
+    setStatus(`模型就绪 · ${state.job.filename}`, `服务端算${why} · ${meta.pitch.toFixed(3)} mm · ${mb} MB`);
     return state.volume;
   } catch (err) {
     hideProgress();

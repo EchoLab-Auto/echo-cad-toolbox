@@ -221,6 +221,47 @@ def volume_grid(
     )
 
 
+@router.get(
+    "/jobs/{job_id}/mesh",
+    summary="原始三角网格（STL 二进制，浏览器端体素化用）",
+    response_class=Response,
+)
+def job_mesh(job_id: str):
+    """把上传时解析出的三角网格以 STL 二进制回传，供浏览器**本地体素化**。
+
+    这是「把算力交给客户机」的桥：服务端只负责把各种格式（含 STEP/IGES 这类
+    必须用 OCCT 才能解的）统一成三角网格，之后体素化、晶格场、等值面、导出
+    全在浏览器里做。服务端不再吃那份内存，客户机有多大的内存就能跑多高的
+    分辨率 —— 这正是薄壁零件不再"满身尖刺"的前提。
+    """
+    try:
+        job = store.get(job_id)
+    except JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        mesh = meshio._load_trimesh_scene(job.mesh_path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"网格读取失败：{exc}") from exc
+
+    data = mesh.export(file_type="stl")
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
+    meta = {
+        "filename": job.filename,
+        "vertices": len(mesh.vertices),
+        "faces": len(mesh.faces),
+        "extents": [float(v) for v in mesh.extents],
+        "bounds": [[float(v) for v in row] for row in np.asarray(mesh.bounds)],
+        "bytes": len(data),
+    }
+    return Response(
+        content=bytes(data),
+        media_type="model/stl",
+        headers={"X-Mesh-Meta": json.dumps(meta, ensure_ascii=False)},
+    )
+
+
 @router.get("/jobs/{job_id}/download/{fmt}", summary="下载 stl / 3mf / obj / ply")
 def download(job_id: str, fmt: str):
     try:
