@@ -300,7 +300,8 @@ def _resolution_warnings(
     wall = float(params["thickness"])
     wall_vox = wall / pitch
     min_thick = WALL_VOXELS_GOOD * pitch
-    if wall_vox < WALL_VOXELS_GOOD:
+    # 2.98 / 3.0 这种边界值不算问题，留 5% 容差，否则用户把壁厚调到刚好会被反复念
+    if wall_vox < WALL_VOXELS_GOOD * 0.95:
         if wall_vox < 1.0:
             msg = (
                 f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm），"
