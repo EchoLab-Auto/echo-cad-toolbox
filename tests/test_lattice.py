@@ -146,6 +146,58 @@ def test_param_normalization() -> None:
     assert p["mode"] == "intersect"
 
 
+def test_thin_wall_is_thickened_automatically() -> None:
+    """壁厚不到 1.5 个体素时自动加厚 —— 否则等值面只会画出一张刺球。"""
+    vol = box_volume(96)
+    pitch = float(vol["pitch"])
+    wall = 1.2 * pitch                       # 只有 1.2 个体素，画不出连续的壁
+    result = pipeline.build(
+        vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": wall,
+              "resolution": 96, "smooth": 0, "decimate": 0.0}
+    )
+    stats = result.stats
+    assert stats["thin_wall_fixed"] is True
+    assert stats["thickness_requested"] == pytest.approx(wall)
+    assert stats["thickness_used"] == pytest.approx(
+        pipeline.MIN_RENDER_WALL_VOXELS * pitch, rel=1e-6
+    )
+    assert stats["wall_voxels"] == pytest.approx(pipeline.MIN_RENDER_WALL_VOXELS, rel=1e-6)
+    assert result.params["thickness"] == pytest.approx(stats["thickness_used"])
+    assert stats["warnings"] and stats["warnings"][0].startswith("ℹ"), "兜底必须告知用户"
+    assert open_edges(result.mesh) == 0, "加厚后的网格应当是闭合实体"
+
+
+def test_thin_wall_off_keeps_requested_thickness() -> None:
+    """thin_wall=off 时按原值硬画，并把"会出尖刺"写进警告。"""
+    vol = box_volume(96)
+    pitch = float(vol["pitch"])
+    wall = 1.2 * pitch
+    result = pipeline.build(
+        vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": wall,
+              "resolution": 96, "smooth": 0, "decimate": 0.0, "thin_wall": "off"}
+    )
+    stats = result.stats
+    assert stats["thin_wall_fixed"] is False
+    assert stats["thickness_used"] == pytest.approx(wall)
+    assert stats["wall_voxels"] == pytest.approx(1.2)
+    assert any(w.startswith("⚠") and "体素" in w for w in stats["warnings"])
+
+
+def test_thin_wall_is_left_alone_when_thick_enough() -> None:
+    """2.4 个体素的壁能画出来，就不该被动过。"""
+    vol = box_volume(96)
+    pitch = float(vol["pitch"])
+    wall = 2.4 * pitch
+    result = pipeline.build(
+        vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": wall,
+              "resolution": 96, "smooth": 0, "decimate": 0.0}
+    )
+    stats = result.stats
+    assert stats["thin_wall_fixed"] is False
+    assert stats["thickness_used"] == pytest.approx(wall)
+    assert not any(w.startswith("ℹ") for w in stats["warnings"])
+
+
 def test_export_formats() -> None:
     """STL / OBJ / PLY / 3MF 都能导出且非空。"""
     vol = box_volume(80)

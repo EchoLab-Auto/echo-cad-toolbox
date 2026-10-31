@@ -310,6 +310,7 @@ function populateConfig(cfg) {
   $('#decRange').value = cfg.defaults.decimate;
   $('#wallSel').value = cfg.defaults.wall_mode || 'sheet';
   $('#skinChk').checked = !!cfg.defaults.keep_skin;
+  $('#thinWallChk').checked = cfg.defaults.thin_wall !== 'off';
 
   syncLatticeLabels();
   syncModeHint();
@@ -377,6 +378,7 @@ function collectParams() {
     mode: $('#modeSel').value,
     shell_thickness: +$('#shellRange').value,
     keep_skin: $('#skinChk').checked,
+    thin_wall: $('#thinWallChk').checked ? 'auto' : 'off',
     skin_thickness: 1.2,
     resolution: +$('#resSel').value,
     warp: +$('#warpRange').value,
@@ -562,6 +564,30 @@ function renderStats(stats, extra = {}) {
   }
 }
 
+/** 与 app/lattice/pipeline.py 的 MIN_RENDER_WALL_VOXELS 保持一致 */
+const MIN_RENDER_WALL_VOXELS = 1.5;
+
+/**
+ * 薄壁兜底（前端版）：GPU 生成不经过服务端 pipeline，规则必须在这里再实现一遍。
+ * 体素比壁还粗时等值面根本连不起来，硬画就是一张刺球 —— 和服务器一样，先把
+ * 壁厚抬到这套体素画得出来的最小值，并把这件事写进警告里。
+ */
+function thinWallFix(params, pitch) {
+  const out = Object.assign({}, params);
+  out.notes = [];
+  if (!(pitch > 0) || params.thin_wall === 'off') return out;
+  const wall = Math.min(+params.thickness, 0.8 * +params.cell_size);
+  const floor = MIN_RENDER_WALL_VOXELS * pitch;
+  if (wall >= floor * 0.98) return out;
+  out.thickness = Math.round(floor * 1000) / 1000;
+  out.notes.push(
+    `ℹ 已按壁厚 ${floor.toFixed(2)} mm 渲染（你填的是 ${wall.toFixed(2)} mm）：体素 ${pitch.toFixed(3)} mm，` +
+    `${wall.toFixed(2)} mm 只占 ${(wall / pitch).toFixed(2)} 个体素，等值面画不出连续的壁，硬画只会得到满身尖刺。` +
+    `${floor.toFixed(2)} mm（${MIN_RENDER_WALL_VOXELS} 个体素）是这套体素下的最薄可画壁厚。`
+  );
+  return out;
+}
+
 /**
  * 客户端诊断：GPU 生成不经过服务端 pipeline，这里按同样的阈值算一遍。
  * 规则与 app/lattice/pipeline.py 的 WALL_VOXELS_GOOD / CELL_VOXELS_MIN 一致。
@@ -572,12 +598,15 @@ function latticeWarnings(params, pitch) {
   const wall = Math.min(+params.thickness, 0.8 * +params.cell_size);
   const wallVox = wall / pitch;
   const cell = Math.min(+params.cell_size, +(params.cell_size_z || params.cell_size));
-  if (wallVox < 3) {
+  // 阈值与后端一致：低于 MIN_RENDER_WALL_VOXELS 才画不出连续的壁；已经兜底加厚过
+  // （params.notes 非空）就不用再念一遍，否则两句话会互相打架。
+  const fixed = Array.isArray(params.notes) && params.notes.length > 0;
+  if (wallVox < MIN_RENDER_WALL_VOXELS && !fixed) {
     const extent = Math.max(...(state.job?.info?.extents || [0]));
-    const need = extent > 0 ? Math.ceil((extent * 3) / Math.max(wall, 1e-9)) : 0;
+    const need = extent > 0 ? Math.ceil((extent * MIN_RENDER_WALL_VOXELS) / Math.max(wall, 1e-9)) : 0;
     out.push(
       `⚠ 壁厚 ${wall.toFixed(2)} mm 只有 ${wallVox.toFixed(2)} 个体素（体素 ${pitch.toFixed(3)} mm），` +
-      `薄壁会被网格漏掉，表面会碎成尖刺/毛边。把壁厚加到 ≥ ${(3 * pitch).toFixed(1)} mm` +
+      `薄壁会被网格漏掉，表面会碎成尖刺/毛边。把壁厚加到 ≥ ${(MIN_RENDER_WALL_VOXELS * pitch).toFixed(1)} mm` +
       (need ? `，或分辨率提到 ≥ ${need}（受本机内存上限约束）` : '') + '，或把模型缩小。'
     );
   }
@@ -614,14 +643,17 @@ function renderPrecision(meta) {
       `<div class="row"><span>孔径 / 体素</span><b class="${holeRatio >= 4 ? 'ok' : 'bad'}">${holeRatio.toFixed(1)}</b></div>`
     );
   }
+  // 壁厚 ≥ MIN_RENDER_WALL_VOXELS 就画得出连续的壁（自动兜底也用它当门槛）；
+  // 3 个体素只是"更漂亮"，所以颜色分三档，别把能画的情况标成红色。
+  const wallTone = wallRatio >= 3 ? 'ok' : (wallRatio >= MIN_RENDER_WALL_VOXELS ? '' : 'bad');
   rows.push(
-    `<div class="row"><span>壁厚 / 体素</span><b class="${wallRatio >= 3 ? 'ok' : 'bad'}">${wallRatio.toFixed(1)}</b></div>`
+    `<div class="row"><span>壁厚 / 体素</span><b class="${wallTone}">${wallRatio.toFixed(1)}</b></div>`
   );
 
-  // 两条硬要求：小孔至少 4 个体素宽，壁厚至少 3 个体素
+  // 两条硬要求：小孔至少 4 个体素宽，壁厚至少能连起来
   const warnings = [...(features?.warnings || [])];
-  if (wallRatio < 2.6) {
-    warnings.push(`壁厚 / 杆径 ${thickness.toFixed(2)} mm 只有 ${wallRatio.toFixed(1)} 个体素，晶格会断续或消失，建议分辨率 ≥ ${suggestResolution(extent, thickness / 3, pitch)}`);
+  if (wallRatio < MIN_RENDER_WALL_VOXELS) {
+    warnings.push(`壁厚 / 杆径 ${thickness.toFixed(2)} mm 只有 ${wallRatio.toFixed(1)} 个体素，画不出连续的壁（会碎成尖刺），建议分辨率 ≥ ${suggestResolution(extent, thickness / MIN_RENDER_WALL_VOXELS, pitch)}`);
   }
   if (holeRatio !== null && holeRatio < 4) {
     warnings.push(`最小孔 ⌀${(holeR * 2).toFixed(2)} mm 只有 ${holeRatio.toFixed(1)} 个体素宽，等值面会明显失真`);
@@ -631,10 +663,10 @@ function renderPrecision(meta) {
   }
   box.innerHTML = rows.join('');
 
-  // 自动分辨率：同时满足「小孔 ≥ 4 体素」「壁厚 ≥ 3 体素」
+  // 自动分辨率：同时满足「小孔 ≥ 4 体素」「壁厚 ≥ MIN_RENDER_WALL_VOXELS 体素」
   const need = Math.max(
     holeR ? suggestResolution(extent, holeR / 2, pitch) : 0,
-    suggestResolution(extent, thickness / 3, pitch)
+    suggestResolution(extent, thickness / MIN_RENDER_WALL_VOXELS, pitch)
   );
   const btn = $('#btnAutoRes');
   if (features?.recommended_resolution || need > 0) {
@@ -850,13 +882,15 @@ async function generateGpu() {
   setStatus('GPU 生成中…', '');
   await nextFrame();
 
-  const params = collectParams();
+  const rawParams = collectParams();
+  const pitch = state.volume?.meta?.pitch || 0;
+  const params = thinWallFix(rawParams, pitch);   // 薄壁兜底：画不出来的壁厚先抬上来
   const t0 = performance.now();
   try {
     const mesh = await state.engine.generate(params);
     state.lastMs = performance.now() - t0;
     state.mesh = mesh;
-    mesh.stats.warnings = latticeWarnings(params, state.volume?.meta?.pitch || 0);
+    mesh.stats.warnings = [...params.notes, ...latticeWarnings(params, pitch)];
 
     clearGroup(groupLattice);
     const holder = new THREE.Group();

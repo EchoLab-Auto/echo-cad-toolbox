@@ -162,15 +162,21 @@ class Job:
             pass
 
 
-def _resolution_for_wall(extent: float, thickness: float) -> int:
-    """要让「壁厚 ≥ pipeline.WALL_VOXELS_GOOD 个体素」，分辨率至少要是多少。
+def _resolution_for_wall(
+    extent: float, thickness: float, voxels: float = pipeline.WALL_VOXELS_GOOD
+) -> int:
+    """要让「壁厚 ≥ voxels 个体素」，分辨率至少要是多少。
 
-    pitch = extent / resolution，所以 resolution ≥ extent * 3 / thickness。
+    pitch = extent / resolution，所以 resolution ≥ extent * voxels / thickness。
     模型尺寸未知（extent<=0）时返回 0，交给调用方按原值处理。
+
+    ``voxels`` 默认取 WALL_VOXELS_GOOD（3，画得好看）；开了薄壁兜底
+    （``thin_wall=auto``）时只要求 MIN_RENDER_WALL_VOXELS（1.5，「画得出连续的
+    壁」的下限）—— 多抬分辨率会白吃内存，1 GiB 的机器上代价很大。
     """
     if extent <= 0 or thickness <= 0:
         return 0
-    return int(math.ceil(extent * pipeline.WALL_VOXELS_GOOD / thickness))
+    return math.ceil(extent * float(voxels) / thickness)
 
 
 class JobStore:
@@ -323,7 +329,13 @@ class JobStore:
         # （只在内存上限允许时）。抬不上去也没关系：pipeline 会把「做不到」写进
         # stats.warnings，前端红字显示。
         extent = max(job.info.get("extents") or [0.0])
-        needed = _resolution_for_wall(extent, float(params["thickness"]))
+        # 薄壁兜底开着时，"画得出连续的壁"就够了（1.5 体素），不必追 3 个体素
+        need_vox = (
+            pipeline.WALL_VOXELS_GOOD
+            if str(params.get("thin_wall")) == "off"
+            else pipeline.MIN_RENDER_WALL_VOXELS
+        )
+        needed = _resolution_for_wall(extent, float(params["thickness"]), need_vox)
         if needed > params["resolution"]:
             params["resolution"] = min(needed, ceiling)
         if params["resolution"] != requested:

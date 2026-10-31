@@ -35,6 +35,7 @@ DEFAULT_PARAMS: dict = {
     "smooth": 1,                  # 平滑迭代
     "decimate": 0.3,              # 抽稀比例 0~0.9
     "align": "min",               # min | center  单胞对齐
+    "thin_wall": "auto",          # auto = 画不出的薄壁自动加厚到能画（结果里说明）；off = 按原值硬画
 }
 
 #: 前端表单用的参数区间（也用于后端校验）
@@ -51,7 +52,8 @@ PARAM_LIMITS: dict = {
     "decimate": (0.0, 0.95),
 }
 
-#: 壁厚 / 杆径至少要有多少个体素，等值面才不会退化成"尖刺"。
+#: 壁厚 / 杆径"画得好看"要多少个体素 —— 用于给用户建议分辨率，不是硬门槛
+#: （硬门槛是下面的 MIN_RENDER_WALL_VOXELS）。
 #: 实测（摆线轮盘 ⌀167、gyroid、cell 10）固定 pitch=1.31 mm 只改壁厚：
 #:
 #: =========  ==========  ============  ==============
@@ -66,9 +68,24 @@ PARAM_LIMITS: dict = {
 #: 低于 ~3 个体素时，采样点会漏掉薄壁（两端都在壁外），等值面只能靠"碰巧
 #: 落在壁内的体素"拼出来 —— 于是变成一串毛刺 / 断续的瘤，表面积虚高好几倍。
 WALL_VOXELS_GOOD = 3.0
-WALL_VOXELS_MIN = 1.6
 #: 单胞至少要有多少个体素，否则晶格形状本身失真（gyroid 的曲面特征被抹平）
 CELL_VOXELS_MIN = 5.0
+
+#: 低于这个体素数就**画不出**这层壁（不是"画得糙"，是根本不连续）—— 与其交给
+#: 用户一张满身尖刺的网格，不如自动加到刚好能画的厚度，并在结果里说清楚。
+#: 实测（摆线轮盘 ⌀167 / gyroid / cell 10，以 res320 细体素为参照的比表面积偏差）：
+#:
+#: ===========  ============  ==================
+#: 壁厚/体素     比表偏差       结论
+#: ===========  ============  ==================
+#: 0.92         +34.6%        尖刺（改前的默认参数）
+#: 1.22         +1.2%         可用
+#: 1.53         -1.1%         可用
+#: 1.80         -2.2%         可用
+#: ===========  ============  ==================
+#:
+#: 临界点在 1.0~1.2 之间，取 1.5 留余量（杆状晶格、渐变壁厚更吃体素）。
+MIN_RENDER_WALL_VOXELS = 1.5
 
 MODES = {
     "intersect": "实体 ∩ 晶格（内部填充晶格）",
@@ -90,6 +107,10 @@ def normalize_params(raw: dict | None, bounds=None) -> dict:
         params["mode"] = "intersect"
     if str(params.get("align")) not in ("min", "center"):
         params["align"] = "min"
+    # auto（默认）：画不出的薄壁自动加厚到能画；off：按用户填的原值硬画（会出尖刺）
+    params["thin_wall"] = (
+        "off" if str(params.get("thin_wall")).lower() in ("off", "keep", "none", "false", "0") else "auto"
+    )
 
     for key, (lo, hi) in PARAM_LIMITS.items():
         if key == "cell_size_z" and params.get(key) in (None, "", "null"):
@@ -162,6 +183,38 @@ def combine_fields(solid: np.ndarray, lat: np.ndarray, params: dict) -> np.ndarr
     return combined
 
 
+def _fit_thickness_to_voxels(params: dict, pitch: float) -> tuple[float, str | None]:
+    """薄壁兜底：把画不出来的壁厚抬到这套体素能画出来的最小值。
+
+    体素比壁还粗时等值面不可能连续（采样点整块落在壁外），只会得到一张满身
+    尖刺、表面积虚高 30%+ 的网格。与其把它交给用户，不如按"能画出来的最薄壁厚"
+    渲染，并把这件事写进结果里 —— 用户至少拿到一个能切片、能打印的实体，也
+    知道自己的 1.20 mm 到底变成了多少。
+
+    返回 ``(实际使用的壁厚, 给用户的说明或 None)``。
+    """
+    requested = float(params["thickness"])
+    if pitch <= 0 or params.get("thin_wall") == "off":
+        return requested, None
+
+    # 加厚也不能越过"壁厚 ≤ 0.8 单胞"这条线，否则晶格会连成实心
+    floor = min(MIN_RENDER_WALL_VOXELS * pitch, 0.8 * float(params["cell_size"]))
+    # 2% 容差：刚好卡在 1.5 个体素上时不要来回抖
+    if requested >= floor * 0.98:
+        return requested, None
+
+    thicker = (floor / requested - 1.0) * 100.0 if requested > 0 else 0.0
+    note = (
+        f"ℹ 已按壁厚 {floor:.2f} mm 渲染（你填的是 {requested:.2f} mm）：体素 {pitch:.3f} mm，"
+        f"{requested:.2f} mm 只占 {requested / pitch:.2f} 个体素，等值面画不出连续的壁，"
+        f"硬画只会得到满身尖刺（实测表面积虚高 35%）。{floor:.2f} mm（{floor / pitch:.1f} 个"
+        f"体素）是这套体素下能画出的最薄壁厚，比你填的厚 {thicker:.0f}%。"
+        f"若要严格 {requested:.2f} mm：提高分辨率、把零件缩小，或切到浏览器 GPU 引擎；"
+        f"也可以把参数 thin_wall 设为 off 按原值硬画。"
+    )
+    return floor, note
+
+
 # --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
@@ -187,6 +240,11 @@ def build(
     pitch = float(volume["pitch"])
     origin = np.asarray(volume["origin"], dtype=np.float64)
     shape = solid.shape
+
+    # 薄壁兜底：体素比壁还粗时硬画出来就是一张刺球，先把它抬到能画的厚度
+    thickness_requested = float(params["thickness"])
+    thickness_used, thin_note = _fit_thickness_to_voxels(params, pitch)
+    params["thickness"] = thickness_used
 
     # 单胞对齐
     bounds = volume.get("bounds")
@@ -241,9 +299,10 @@ def build(
     mesh = _clean_mesh(mesh, pitch)
 
     boundary_edges, nonmanifold_edges = _edge_health(mesh)
-    warnings = _resolution_warnings(
+    warnings = ([thin_note] if thin_note else []) + _resolution_warnings(
         params, pitch, mesh,
         extent=float(np.max(np.asarray(bounds[1]) - np.asarray(bounds[0]))) if bounds is not None else 0.0,
+        wall_already_fixed=thin_note is not None,
     ) + list(mesh_notes)
     stats = {
         "faces": len(mesh.faces),
@@ -266,6 +325,10 @@ def build(
         "voxel_pitch": float(pitch),
         "voxel_shape": [int(v) for v in shape],
         "wall_voxels": float(params["thickness"] / pitch) if pitch > 0 else 0.0,
+        "thickness_requested": float(thickness_requested),
+        "thickness_used": float(thickness_used),
+        "thin_wall_fixed": bool(thin_note),
+        "min_wall_voxels": float(MIN_RENDER_WALL_VOXELS),
         "cell_voxels": float(min(params["cell_size"], cell_z) / pitch) if pitch > 0 else 0.0,
         "warnings": warnings,
         "seconds": round(time.time() - t_start, 2),
@@ -286,7 +349,11 @@ def _edge_health(mesh: trimesh.Trimesh) -> tuple[int, int]:
 
 
 def _resolution_warnings(
-    params: dict, pitch: float, mesh: trimesh.Trimesh, extent: float = 0.0
+    params: dict,
+    pitch: float,
+    mesh: trimesh.Trimesh,
+    extent: float = 0.0,
+    wall_already_fixed: bool = False,
 ) -> list[str]:
     """把「这个分辨率根本画不出这层壁」翻译成用户能动手的一句话。
 
@@ -299,24 +366,25 @@ def _resolution_warnings(
 
     wall = float(params["thickness"])
     wall_vox = wall / pitch
-    min_thick = WALL_VOXELS_GOOD * pitch
-    # 2.98 / 3.0 这种边界值不算问题，留 5% 容差，否则用户把壁厚调到刚好会被反复念
-    if wall_vox < WALL_VOXELS_GOOD * 0.95:
+    min_thick = MIN_RENDER_WALL_VOXELS * pitch
+    # 阈值就是"画得出连续的壁"的下限（实测 1.2 个体素起比表面积偏差已在 ±2% 内）；
+    # thin_wall=off 时才会落到这里 —— auto 模式下已经兜底加厚过，不该再念一遍。
+    if wall_vox < MIN_RENDER_WALL_VOXELS and not wall_already_fixed:
         if wall_vox < 1.0:
             msg = (
                 f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm），"
                 f"比一个体素还薄 —— 采样点会整块漏掉这层壁，等值面只能把零星落在壁内的"
-                f"体素连起来，于是表面碎成一片尖刺/毛边（实测表面积虚高 3 倍）。"
+                f"体素连起来，于是表面碎成一片尖刺/毛边（实测表面积虚高 35%）。"
             )
         else:
             msg = (
                 f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm，"
-                f"建议 ≥ {WALL_VOXELS_GOOD:.0f}）—— 采样会漏掉一部分薄壁，表面出现毛边和"
-                f"断续的凸起，尺寸也不准。"
+                f"至少要 {MIN_RENDER_WALL_VOXELS:.1f} 个才能画出连续的壁）—— 表面会出现"
+                f"毛边和断续的凸起，尺寸也不准。"
             )
         fixes = [f"把壁厚加到 ≥ {min_thick:.1f} mm"]
         if extent > 0:
-            need = int(np.ceil(extent * WALL_VOXELS_GOOD / max(wall, 1e-9)))
+            need = int(np.ceil(extent * MIN_RENDER_WALL_VOXELS / max(wall, 1e-9)))
             fixes.append(f"或把分辨率提到 ≥ {need}（受本机内存上限约束）")
         fixes.append("或把模型等比缩小")
         out.append("⚠ " + msg + "可选：" + "；".join(fixes) + "。")
