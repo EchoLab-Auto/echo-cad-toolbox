@@ -728,8 +728,10 @@ def volume_to_mesh(
         before = len(mesh.faces)
         mesh = _decimate_keep_watertight(mesh, target)
         if notes is not None and len(mesh.faces) > int(target * 1.25):
+            # 完全没抽 vs 只抽了一点点，措辞要分清，否则"已跳过"会跟面数对不上
+            head = "抽稀幅度已自动收窄" if len(mesh.faces) < before else "抽稀已跳过"
             notes.append(
-                f"ℹ 抽稀已跳过（原 {before:,} 面，目标 {target:,} 面，实际 {len(mesh.faces):,} 面）："
+                f"ℹ {head}（原 {before:,} 面，目标 {target:,} 面，实际 {len(mesh.faces):,} 面）："
                 f"再抽就会把闭合网格缝出非流形边，宁可多留面。"
             )
         gc.collect()
