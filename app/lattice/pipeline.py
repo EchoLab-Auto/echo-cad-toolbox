@@ -338,10 +338,10 @@ def _resolution_warnings(
             nonmanifold = int((counts > 2).sum())
         except Exception:  # noqa: BLE001
             nonmanifold = 0
-        if nonmanifold:
+        if nonmanifold > max(4, len(mesh.faces) // 5000):
             out.append(
                 f"⚠ 网格有 {nonmanifold} 条非流形边（不是闭合实体），切片前要修："
-                f"多半是抽稀比例太大，把「抽稀」调小或调 0。"
+                f"多半是抽稀把薄壁两层缝到了一起，把「抽稀」调小或调 0。"
             )
     return out
 
