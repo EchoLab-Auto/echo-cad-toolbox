@@ -157,12 +157,16 @@ body.app {
 .precision .row b { font-family: var(--mono); color: var(--fg-bright); font-weight: 500; }
 .precision .ok { color: var(--accent-bright); }
 .precision .bad { color: var(--danger); }
-.precision .warnline {
+.precision .warnline,
+#statsPanel .warnline {
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px dashed var(--line);
   color: #e8c07a;
+  font-size: 11px;
+  line-height: 1.55;
 }
+#statsPanel .warnline div + div { margin-top: 4px; }
 
 /* ---- 高级选项 ---- */
 .advanced {

@@ -720,7 +720,7 @@ def volume_to_mesh(
     elif decimate_ratio:
         target = max(1000, int(len(mesh.faces) * (1.0 - float(decimate_ratio))))
     if target and target < len(mesh.faces):
-        mesh = _decimate(mesh, target)
+        mesh = _decimate_keep_watertight(mesh, target)
         gc.collect()
 
     if smooth_iters and smooth_iters > 0:
@@ -730,6 +730,39 @@ def volume_to_mesh(
             pass
 
     mesh.process(validate=True)
+    return mesh
+
+
+def _nonmanifold_edges(mesh: trimesh.Trimesh) -> int:
+    try:
+        counts = np.unique(np.asarray(mesh.edges_sorted), axis=0, return_counts=True)[1]
+        return int((counts > 2).sum())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _decimate_keep_watertight(
+    mesh: trimesh.Trimesh, target_faces: int
+) -> trimesh.Trimesh:
+    """抽稀，但不许把闭合网格抽成非流形。
+
+    二次误差抽稀靠边折叠降面，在薄壁 / 细杆上折叠会把"壁的两层"缝到一起，产生
+    非流形边（实测摆线轮盘 gyroid 用默认 30% 抽稀就能造出 34~198 条），切片软件
+    会直接判为坏模型。这里按「目标幅度 → 一半 → 四分之一」退让：能抽就抽，
+    抽坏了宁可不抽 —— 多几万个面，也不要一个打印不了的实体。
+    """
+    before = _nonmanifold_edges(mesh)
+    was_watertight = bool(mesh.is_watertight)
+    span = len(mesh.faces) - int(target_faces)
+    if span <= 0:
+        return mesh
+    for keep in (1.0, 0.5, 0.25):
+        target = int(target_faces + span * (1.0 - keep))
+        out = _decimate(mesh, max(target, 1000))
+        if out is mesh or len(out.faces) >= len(mesh.faces):
+            break
+        if _nonmanifold_edges(out) <= before and (not was_watertight or out.is_watertight):
+            return out
     return mesh
 
 

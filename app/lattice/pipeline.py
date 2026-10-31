@@ -51,6 +51,25 @@ PARAM_LIMITS: dict = {
     "decimate": (0.0, 0.95),
 }
 
+#: 壁厚 / 杆径至少要有多少个体素，等值面才不会退化成"尖刺"。
+#: 实测（摆线轮盘 ⌀167、gyroid、cell 10）固定 pitch=1.31 mm 只改壁厚：
+#:
+#: =========  ==========  ============  ==============
+#: 壁厚       体素/壁厚   比表面积      结果
+#: =========  ==========  ============  ==============
+#: 1.2 mm    0.92        2.79 1/mm     碎成毛刺（真值 ≈0.87）
+#: 2.0 mm    1.53        1.36 1/mm     仍明显虚高
+#: 2.6 mm    1.98        1.12 1/mm     接近
+#: 3.9 mm    2.98        0.87 1/mm     与解析值一致
+#: =========  ==========  ============  ==============
+#:
+#: 低于 ~3 个体素时，采样点会漏掉薄壁（两端都在壁外），等值面只能靠"碰巧
+#: 落在壁内的体素"拼出来 —— 于是变成一串毛刺 / 断续的瘤，表面积虚高好几倍。
+WALL_VOXELS_GOOD = 3.0
+WALL_VOXELS_MIN = 1.6
+#: 单胞至少要有多少个体素，否则晶格形状本身失真（gyroid 的曲面特征被抹平）
+CELL_VOXELS_MIN = 5.0
+
 MODES = {
     "intersect": "实体 ∩ 晶格（内部填充晶格）",
     "shell": "仅表层壳内填充晶格",
@@ -220,6 +239,10 @@ def build(
     mesh = _clean_mesh(mesh, pitch)
 
     boundary_edges, nonmanifold_edges = _edge_health(mesh)
+    warnings = _resolution_warnings(
+        params, pitch, mesh,
+        extent=float(np.max(np.asarray(bounds[1]) - np.asarray(bounds[0]))) if bounds is not None else 0.0,
+    )
     stats = {
         "faces": len(mesh.faces),
         "boundary_edges": boundary_edges,
@@ -240,6 +263,9 @@ def build(
         ),
         "voxel_pitch": float(pitch),
         "voxel_shape": [int(v) for v in shape],
+        "wall_voxels": float(params["thickness"] / pitch) if pitch > 0 else 0.0,
+        "cell_voxels": float(min(params["cell_size"], cell_z) / pitch) if pitch > 0 else 0.0,
+        "warnings": warnings,
         "seconds": round(time.time() - t_start, 2),
         "extents": [float(v) for v in mesh.extents],
     }
@@ -255,6 +281,59 @@ def _edge_health(mesh: trimesh.Trimesh) -> tuple[int, int]:
         return int((counts == 1).sum()), int((counts > 2).sum())
     except Exception:  # noqa: BLE001
         return -1, -1
+
+
+def _resolution_warnings(
+    params: dict, pitch: float, mesh: trimesh.Trimesh, extent: float = 0.0
+) -> list[str]:
+    """把「这个分辨率根本画不出这层壁」翻译成用户能动手的一句话。
+
+    体素化之后 pitch 就定死了，用户能改的只有壁厚 / 分辨率 / 模型尺寸，所以每条
+    建议都给**具体数值**，而不是一句「请提高分辨率」。
+    """
+    out: list[str] = []
+    if pitch <= 0:
+        return out
+
+    wall = float(params["thickness"])
+    wall_vox = wall / pitch
+    min_thick = WALL_VOXELS_GOOD * pitch
+    if wall_vox < WALL_VOXELS_GOOD:
+        msg = (
+            f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm），"
+            f"比一个体素还薄 —— 采样点会整块漏掉这层壁，等值面只能把零星落在壁内的"
+            f"体素连起来，于是表面变成一片尖刺/毛边（实测表面积虚高 2~3 倍）。"
+        )
+        fixes = [f"把壁厚加到 ≥ {min_thick:.1f} mm"]
+        if extent > 0:
+            need = int(np.ceil(extent * WALL_VOXELS_GOOD / max(wall, 1e-9)))
+            fixes.append(f"或把分辨率提到 ≥ {need}（受本机内存上限约束）")
+        fixes.append("或把模型等比缩小")
+        out.append("⚠ " + msg + "可选：" + "；".join(fixes) + "。")
+
+    cell = min(
+        float(params["cell_size"]),
+        float(params.get("cell_size_z") or params["cell_size"]),
+    )
+    if cell / pitch < CELL_VOXELS_MIN:
+        out.append(
+            f"⚠ 单胞 {cell:.1f} mm 只有 {cell / pitch:.1f} 个体素"
+            f"（建议 ≥ {CELL_VOXELS_MIN:.0f}）：晶格本身的形状会被抹平，"
+            f"先加大单胞或提高分辨率。"
+        )
+
+    if not mesh.is_watertight:
+        try:
+            counts = np.unique(np.asarray(mesh.edges_sorted), axis=0, return_counts=True)[1]
+            nonmanifold = int((counts > 2).sum())
+        except Exception:  # noqa: BLE001
+            nonmanifold = 0
+        if nonmanifold:
+            out.append(
+                f"⚠ 网格有 {nonmanifold} 条非流形边（不是闭合实体），切片前要修："
+                f"多半是抽稀比例太大，把「抽稀」调小或调 0。"
+            )
+    return out
 
 
 def _clean_mesh(mesh: trimesh.Trimesh, pitch: float) -> trimesh.Trimesh:

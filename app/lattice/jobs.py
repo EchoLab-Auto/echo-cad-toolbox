@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import gc
 import json
+import math
 import os
 import shutil
 import threading
@@ -161,6 +162,17 @@ class Job:
             pass
 
 
+def _resolution_for_wall(extent: float, thickness: float) -> int:
+    """要让「壁厚 ≥ pipeline.WALL_VOXELS_GOOD 个体素」，分辨率至少要是多少。
+
+    pitch = extent / resolution，所以 resolution ≥ extent * 3 / thickness。
+    模型尺寸未知（extent<=0）时返回 0，交给调用方按原值处理。
+    """
+    if extent <= 0 or thickness <= 0:
+        return 0
+    return int(math.ceil(extent * pipeline.WALL_VOXELS_GOOD / thickness))
+
+
 class JobStore:
     def __init__(self, workers: int | None = None):
         # 默认按内存能力决定并发数：小内存机器只跑一个，避免两个任务叠加 OOM
@@ -303,7 +315,23 @@ class JobStore:
         params = pipeline.normalize_params(raw_params)
         # 体素分辨率不能超过本机内存能承受的上限，否则会把容器 OOM 掉
         ceiling = resources.max_resolution()[0]
-        params["resolution"] = min(params["resolution"], ceiling)
+        requested = int(params["resolution"])
+        params["resolution"] = min(requested, ceiling)
+
+        # 壁厚不够 3 个体素时，等值面会被体素网格剁碎成尖刺 —— 与其让用户拿到
+        # 一个满身毛刺的实体再自己猜原因，不如按"够画出来"反推分辨率并自动抬上去
+        # （只在内存上限允许时）。抬不上去也没关系：pipeline 会把「做不到」写进
+        # stats.warnings，前端红字显示。
+        extent = max(job.info.get("extents") or [0.0])
+        needed = _resolution_for_wall(extent, float(params["thickness"]))
+        if needed > params["resolution"]:
+            params["resolution"] = min(needed, ceiling)
+        if params["resolution"] != requested:
+            params["_resolution_note"] = (
+                f"分辨率 {requested} → {params['resolution']}"
+                + ("（按壁厚自动提升）" if params["resolution"] == min(needed, ceiling) and needed > requested
+                   else "（受本机内存上限约束）")
+            )
         job.set_state(
             status="running", progress=0.0, stage="排队", error=None, params=params
         )
@@ -313,12 +341,15 @@ class JobStore:
 
     def _run_generate(self, job: Job, params: dict) -> None:
         try:
+            note = params.pop("_resolution_note", None)
             volume = self._ensure_volume(job, int(params["resolution"]))
             result = pipeline.build(
                 volume,
                 params,
                 progress=lambda frac, stage: job.set_state(progress=frac, stage=stage),
             )
+            if note:
+                result.stats["warnings"] = [f"ℹ {note}"] + list(result.stats.get("warnings") or [])
             job.set_state(progress=0.95, stage="导出产物")
             io_mesh.export_mesh(result.mesh, job.lattice_stl)
 
@@ -392,9 +423,19 @@ class JobStore:
 
         stem = Path(job.filename).stem or "lattice"
         target = job.dir / f"{stem}_lattice.{fmt}"
-        if not target.exists():
+        # 必须比 mtime：重新生成后 lattice.stl 会更新，但这里以前只判断
+        # `not target.exists()`，于是**第一次导出的文件会一直被下发**——用户改完
+        # 参数重新生成、再下载，拿到的还是上一次的模型（看起来"改了没用"）。
+        stale = (
+            not target.exists()
+            or target.stat().st_mtime < job.lattice_stl.stat().st_mtime
+        )
+        if stale and fmt != "stl":
             mesh = io_mesh._load_trimesh_scene(job.lattice_stl)
             io_mesh.export_mesh(mesh, target)
+        elif stale:
+            # stl 直接从权威产物复制，省去一次读-写往返
+            shutil.copyfile(job.lattice_stl, target)
         return target, f"{stem}_lattice.{fmt}"
 
 

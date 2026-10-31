@@ -548,6 +548,43 @@ function renderStats(stats, extra = {}) {
   rows.push(['耗时', extra.seconds !== undefined ? `${extra.seconds} s` : `${(state.lastMs / 1000).toFixed(2)} s`]);
   $('#statsKv').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('#statsPanel').hidden = false;
+
+  // 服务端（或下面 GPU 分支）算出来的"这个分辨率画不出这层壁"之类的诊断，
+  // 必须落在用户看得见的地方 —— 否则尖刺只能靠肉眼发现，参数却看不出问题。
+  const warnBox = $('#statsWarn');
+  const warnings = Array.isArray(stats.warnings) ? stats.warnings : [];
+  if (warnings.length) {
+    warnBox.hidden = false;
+    warnBox.innerHTML = warnings.map((w) => `<div>${w}</div>`).join('');
+  } else {
+    warnBox.hidden = true;
+    warnBox.innerHTML = '';
+  }
+}
+
+/**
+ * 客户端诊断：GPU 生成不经过服务端 pipeline，这里按同样的阈值算一遍。
+ * 规则与 app/lattice/pipeline.py 的 WALL_VOXELS_GOOD / CELL_VOXELS_MIN 一致。
+ */
+function latticeWarnings(params, pitch) {
+  const out = [];
+  if (!(pitch > 0)) return out;
+  const wall = Math.min(+params.thickness, 0.8 * +params.cell_size);
+  const wallVox = wall / pitch;
+  const cell = Math.min(+params.cell_size, +(params.cell_size_z || params.cell_size));
+  if (wallVox < 3) {
+    const extent = Math.max(...(state.job?.info?.extents || [0]));
+    const need = extent > 0 ? Math.ceil((extent * 3) / Math.max(wall, 1e-9)) : 0;
+    out.push(
+      `⚠ 壁厚 ${wall.toFixed(2)} mm 只有 ${wallVox.toFixed(2)} 个体素（体素 ${pitch.toFixed(3)} mm），` +
+      `薄壁会被网格漏掉，表面会碎成尖刺/毛边。把壁厚加到 ≥ ${(3 * pitch).toFixed(1)} mm` +
+      (need ? `，或分辨率提到 ≥ ${need}（受本机内存上限约束）` : '') + '，或把模型缩小。'
+    );
+  }
+  if (cell / pitch < 5) {
+    out.push(`⚠ 单胞 ${cell.toFixed(1)} mm 只有 ${(cell / pitch).toFixed(1)} 个体素（建议 ≥ 5），晶格形状会被抹平。`);
+  }
+  return out;
 }
 
 /** 精度诊断：体素尺寸 vs 模型最小特征 / 晶格壁厚 */
@@ -819,6 +856,7 @@ async function generateGpu() {
     const mesh = await state.engine.generate(params);
     state.lastMs = performance.now() - t0;
     state.mesh = mesh;
+    mesh.stats.warnings = latticeWarnings(params, state.volume?.meta?.pitch || 0);
 
     clearGroup(groupLattice);
     const holder = new THREE.Group();
