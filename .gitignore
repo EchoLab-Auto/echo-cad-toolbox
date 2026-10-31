@@ -32,3 +32,6 @@ data/uploads/
 .idea/
 .DS_Store
 .certs/
+
+# 体素化交叉验证的临时夹具
+tmp-verify/fix/

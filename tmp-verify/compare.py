@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 
-OUT = Path("/tmp/fix")
+OUT = Path(os.environ.get("FIX_DIR") or (Path(__file__).parent / "fix"))
 
 
 def load(name: str, suffix: str) -> np.ndarray:

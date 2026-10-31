@@ -6,9 +6,10 @@
 import fs from 'node:fs';
 
 const name = process.argv[2] || 'box';
-const OUT = '/tmp/fix';
+const HERE = new URL('.', import.meta.url);
+const OUT = process.env.FIX_DIR || new URL('fix/', HERE).pathname;
 
-const { voxelize } = await import('/work/app/static/lattice/client/voxelize.js');
+const { voxelize } = await import(new URL('../app/static/lattice/client/voxelize.js', HERE).href);
 
 const posBuf = fs.readFileSync(`${OUT}/${name}_pos.bin`);
 const idxBuf = fs.readFileSync(`${OUT}/${name}_idx.bin`);

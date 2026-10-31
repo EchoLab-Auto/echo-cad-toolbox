@@ -12,17 +12,18 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import trimesh
 
-sys.path.insert(0, "/work")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.lattice import voxel  # noqa: E402
 
-OUT = Path("/tmp/fix")
+OUT = Path(os.environ.get("FIX_DIR") or (Path(__file__).parent / "fix"))
 OUT.mkdir(parents=True, exist_ok=True)
 
 RES = {"box": 96, "torus": 128, "cycloid": 128}
