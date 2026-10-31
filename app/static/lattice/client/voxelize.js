@@ -30,6 +30,11 @@ const BAND_MAX_VOXELS = 400000;
 /** 精确距离计算的分批大小 */
 const VOXEL_CHUNK = 8192;
 
+/** 「无穷远」哨兵。别用 1e20：加上 q² 后尾数会丢光，(inf - inf) 算出来是 0。 */
+const INF = 1e20;
+/** 判定"这条线上没有种子"的阈值 */
+const IS_INF = 1e19;
+
 export class VoxelizeError extends Error {}
 
 /**
@@ -388,33 +393,45 @@ function edtDistance(occ, shape, wantInside, pitch, onProgress) {
   const p2 = pitch * pitch;
   for (let i = 0; i < count; i++) {
     const d2 = f[i];
-    out[i] = d2 === INF ? 1e6 : Math.sqrt(d2 * p2);
+    // 无种子（整条线都到不了异类体素）时给一个大而有限的值，供下游当"很远"用
+    out[i] = d2 >= IS_INF ? 1e6 : Math.sqrt(d2 * p2);
   }
   return out;
 }
 
-const INF = 1e20;
-
 /**
  * 一维平方距离变换：d[q] = min_p ( (q-p)^2 + f[p] )。
- * 标准的下包络抛物线算法，O(n)。
+ *
+ * 下包络抛物线算法，O(n)。关键点：**只把有限值的点当作抛物线起点**。整条线
+ * 都无种子时（比如实体内部远离表面的那一整列）结果保持 INF，而不是被
+ * `inf - inf` 算成 0 —— 那样会让深处距离全部塌成 0，SDF 形状虽然对、数值全错。
  */
 function edt1d(f, n, d, v, z) {
-  let k = 0;
-  v[0] = 0;
-  z[0] = -INF;
-  z[1] = INF;
-
-  for (let q = 1; q < n; q++) {
+  let k = -1;
+  for (let q = 0; q < n; q++) {
+    if (f[q] >= IS_INF) continue;         // 无种子的位置不参与
+    if (k < 0) {
+      k = 0;
+      v[0] = q;
+      z[0] = -INF;
+      z[1] = INF;
+      continue;
+    }
     let s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
     while (s <= z[k]) {
       k--;
+      if (k < 0) break;
       s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
     }
     k++;
     v[k] = q;
     z[k] = s;
     z[k + 1] = INF;
+  }
+
+  if (k < 0) {                            // 整条线都没有种子
+    for (let q = 0; q < n; q++) d[q] = INF;
+    return;
   }
 
   k = 0;
