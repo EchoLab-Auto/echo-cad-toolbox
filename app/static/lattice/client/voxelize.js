@@ -365,7 +365,9 @@ function edtDistance(occ, shape, wantInside, pitch, onProgress) {
   const v = new Int32Array(lineLen);
   const z = new Float64Array(lineLen + 1);
 
-  const strides = [1, nx, nx * ny];
+  // C 序（与服务端 numpy 的 shape=(nx,ny,nz) 一致）：索引 = (x*ny + y)*nz + z，
+  // 所以 x 的步长是 ny*nz、y 是 nz、z 是 1。写成 Fortran 序会让多轴结果全错。
+  const strides = [ny * nz, nz, 1];
   const lens = [nx, ny, nz];
 
   for (let axis = 0; axis < 3; axis++) {
