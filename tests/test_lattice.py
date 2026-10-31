@@ -123,15 +123,28 @@ def test_resolution_is_clamped_to_memory_ceiling() -> None:
     client.delete(f"/api/lattice/jobs/{job_id}")
 
 
-def test_decimate_then_smooth_keeps_mesh_valid() -> None:
-    """抽稀在平滑之前：结果仍要闭合，且面数确实下降。"""
+def test_decimate_never_breaks_watertight() -> None:
+    """抽稀只能在不新增坏边的前提下生效；抽坏了宁可不抽，并告知用户。
+
+    gyroid 的薄壁能抽（60% 仍闭合），bcc 的细杆抽到 60% 就会把杆两侧缝成非流形
+    边 —— 那就退回不抽，并在 warnings 里说明。
+    """
     vol = box_volume(96)
-    raw = pipeline.build(vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": 1.0,
-                               "resolution": 96, "decimate": 0.0, "smooth": 0})
-    thin = pipeline.build(vol, {"lattice": "gyroid", "cell_size": 8.0, "thickness": 1.0,
-                                "resolution": 96, "decimate": 0.6, "smooth": 1})
-    assert thin.stats["faces"] < raw.stats["faces"] * 0.6, "抽稀没有生效"
-    assert open_edges(thin.mesh) == 0, "抽稀+平滑后网格出现开口"
+    gyroid = {"lattice": "gyroid", "cell_size": 8.0, "thickness": 1.0,
+              "resolution": 96, "smooth": 0}
+    raw = pipeline.build(vol, {**gyroid, "decimate": 0.0})
+    cut = pipeline.build(vol, {**gyroid, "decimate": 0.6})
+    assert cut.stats["faces"] < raw.stats["faces"], "gyroid 上抽稀应当生效"
+    assert cut.stats["boundary_edges"] == 0, "抽稀抽出了洞"
+    assert cut.stats["nonmanifold_edges"] == 0, "抽稀缝出了非流形边"
+
+    rod = {"lattice": "bcc", "cell_size": 8.0, "thickness": 1.0,
+           "resolution": 96, "smooth": 0}
+    raw_rod = pipeline.build(vol, {**rod, "decimate": 0.0})
+    cut_rod = pipeline.build(vol, {**rod, "decimate": 0.6})
+    assert cut_rod.stats["nonmanifold_edges"] == 0, "抽稀把细杆缝成了非流形边"
+    if cut_rod.stats["faces"] >= raw_rod.stats["faces"]:
+        assert any("抽稀已跳过" in w for w in cut_rod.stats["warnings"]), "跳过抽稀要说一声"
 
 
 def test_param_normalization() -> None:

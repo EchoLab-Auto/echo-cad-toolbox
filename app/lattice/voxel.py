@@ -729,8 +729,8 @@ def volume_to_mesh(
         mesh = _decimate_keep_watertight(mesh, target)
         if notes is not None and len(mesh.faces) > int(target * 1.25):
             notes.append(
-                f"ℹ 抽稀已跳过（目标 {target:,} 面，实际 {len(mesh.faces):,} 面）："
-                f"二次误差抽稀会把闭合网格抽成非流形，宁可多留面。"
+                f"ℹ 抽稀已跳过（原 {before:,} 面，目标 {target:,} 面，实际 {len(mesh.faces):,} 面）："
+                f"再抽就会把闭合网格缝出非流形边，宁可多留面。"
             )
         gc.collect()
 
@@ -756,14 +756,18 @@ def _edge_defects(mesh: trimesh.Trimesh) -> tuple[int, int]:
 def _decimate_keep_watertight(
     mesh: trimesh.Trimesh, target_faces: int
 ) -> trimesh.Trimesh:
-    """抽稀，但不许把网格抽出**洞**来。
+    """抽稀，但**一条坏边都不许新增**。
 
-    二次误差抽稀靠边折叠降面，折叠时可能把"薄壁的两层"缝到一起，产生少量非流形
-    边（实测 40 万面抽到 16 万面只出 1 条，但摆线轮盘那种薄壁上能到 200 条）。
+    二次误差抽稀靠边折叠降面，折叠时会把"薄壁的两层"缝到一起，产生非流形边 ——
+    摆线轮盘 gyroid 上实测（20 万面）：抽 5% 还干净，抽 10% 就出 2 条非流形边，
+    抽 50% 出 22 条。非流形边会让 trimesh 判 ``is_watertight=False``，切片软件也
+    要修，所以这里不给"与面数成比例的小容差"，一律硬判：
 
-    判定用"开口边"作硬指标（洞会让切片软件判废），非流形边给一个与面数成比例的
-    小容差（每 5000 面 1 条 + 2），超了就把抽稀幅度减半重试，再超就干脆不抽稀 ——
-    宁可多留面，也不要一个打印不了的实体。
+    - 开口边（洞）不能增加 —— 洞直接判废；
+    - 非流形边不能增加 —— 薄壁模型上只要开始出就说明折叠已经缝穿了两层。
+
+    超了就把抽稀幅度减半重试（30% → 15% → 7.5%），再不行就不抽稀：宁可多留几万
+    个面，也不要一个打印不了的实体。抽稀省下的是文件体积，赔上的是可打印性。
     """
     open0, nm0 = _edge_defects(mesh)
     span = len(mesh.faces) - int(target_faces)
@@ -775,8 +779,7 @@ def _decimate_keep_watertight(
         if out is mesh or len(out.faces) >= len(mesh.faces):
             break
         opened, nonmanifold = _edge_defects(out)
-        tol = max(nm0, len(out.faces) // 5000 + 2)
-        if (open0 < 0 or opened <= open0) and (nm0 < 0 or nonmanifold <= tol):
+        if (open0 < 0 or opened <= open0) and (nm0 < 0 or nonmanifold <= nm0):
             return out
     return mesh
 
