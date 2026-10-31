@@ -687,8 +687,13 @@ def volume_to_mesh(
     smooth_iters: int = 0,
     decimate_ratio: float = 0.0,
     decimate_target_faces: int | None = None,
+    notes: list[str] | None = None,
 ) -> trimesh.Trimesh:
-    """marching cubes 提取等值面 → 可选平滑 / 抽稀。"""
+    """marching cubes 提取等值面 → 可选平滑 / 抽稀。
+
+    ``notes``：可选的字符串列表，用来把「抽稀被放弃」这类副产物信息带回调用方
+    （方便上层拼进给用户看的 warnings）。
+    """
     from skimage import measure
 
     field = np.ascontiguousarray(field, dtype=np.float32)
@@ -720,7 +725,13 @@ def volume_to_mesh(
     elif decimate_ratio:
         target = max(1000, int(len(mesh.faces) * (1.0 - float(decimate_ratio))))
     if target and target < len(mesh.faces):
+        before = len(mesh.faces)
         mesh = _decimate_keep_watertight(mesh, target)
+        if notes is not None and len(mesh.faces) > int(target * 1.25):
+            notes.append(
+                f"ℹ 抽稀已跳过（目标 {target:,} 面，实际 {len(mesh.faces):,} 面）："
+                f"二次误差抽稀会把闭合网格抽成非流形，宁可多留面。"
+            )
         gc.collect()
 
     if smooth_iters and smooth_iters > 0:

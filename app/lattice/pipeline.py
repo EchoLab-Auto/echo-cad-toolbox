@@ -226,6 +226,7 @@ def build(
     rel_density = (new["volume"] / orig["volume"]) if orig["volume"] > 0 else 0.0
 
     report(0.65, "提取等值面")
+    mesh_notes: list[str] = []
     mesh = volume_to_mesh(
         combined,
         pitch,
@@ -233,6 +234,7 @@ def build(
         level=0.0,
         smooth_iters=int(params["smooth"]),
         decimate_ratio=float(params["decimate"]),
+        notes=mesh_notes,
     )
 
     report(0.9, "清理网格")
@@ -242,7 +244,7 @@ def build(
     warnings = _resolution_warnings(
         params, pitch, mesh,
         extent=float(np.max(np.asarray(bounds[1]) - np.asarray(bounds[0]))) if bounds is not None else 0.0,
-    )
+    ) + list(mesh_notes)
     stats = {
         "faces": len(mesh.faces),
         "boundary_edges": boundary_edges,
@@ -299,11 +301,18 @@ def _resolution_warnings(
     wall_vox = wall / pitch
     min_thick = WALL_VOXELS_GOOD * pitch
     if wall_vox < WALL_VOXELS_GOOD:
-        msg = (
-            f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm），"
-            f"比一个体素还薄 —— 采样点会整块漏掉这层壁，等值面只能把零星落在壁内的"
-            f"体素连起来，于是表面变成一片尖刺/毛边（实测表面积虚高 2~3 倍）。"
-        )
+        if wall_vox < 1.0:
+            msg = (
+                f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm），"
+                f"比一个体素还薄 —— 采样点会整块漏掉这层壁，等值面只能把零星落在壁内的"
+                f"体素连起来，于是表面碎成一片尖刺/毛边（实测表面积虚高 3 倍）。"
+            )
+        else:
+            msg = (
+                f"壁厚 {wall:.2f} mm 只有 {wall_vox:.2f} 个体素（体素 {pitch:.3f} mm，"
+                f"建议 ≥ {WALL_VOXELS_GOOD:.0f}）—— 采样会漏掉一部分薄壁，表面出现毛边和"
+                f"断续的凸起，尺寸也不准。"
+            )
         fixes = [f"把壁厚加到 ≥ {min_thick:.1f} mm"]
         if extent > 0:
             need = int(np.ceil(extent * WALL_VOXELS_GOOD / max(wall, 1e-9)))
